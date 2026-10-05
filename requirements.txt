@@ -1,0 +1,21 @@
+# core
+numpy
+scipy
+shapely>=2.1
+pyproj
+trimesh
+mapbox-earcut
+matplotlib
+triangle           # needed by the udgeom checker (uDALES clone)
+
+# vegetation
+rasterio
+scikit-image
+laspy[lazrs]       # LAS/LAZ point clouds (lidar source with las_files)
+
+# udprep cross-check (imports uDALES' udbase)
+xarray
+pandas
+
+# tests
+pytest

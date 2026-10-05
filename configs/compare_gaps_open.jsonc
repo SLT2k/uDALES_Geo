@@ -1,0 +1,28 @@
+// Comparison case: sub-grid gaps between buildings left OPEN (Earl's Court terraces)
+//
+// Twin: compare_gaps_filled.jsonc. The ONE setting that differs is
+//   buildings.fill_gaps = false here, true in the twin
+// (plus name/expnr). Gaps narrower than one grid cell (2 m) stay open: at best one
+// cell wide, and where no cell centre falls inside a gap, uDALES gives the
+// walls facing it no heat or momentum exchange. Same site, heights, trees and grid in both cases.
+// Every parameter not listed here is at its default (see configs/example.jsonc).
+// Run:   .venv\Scripts\python -m udales_geo configs\compare_gaps_open.jsonc
+{
+  "name": "compare_gaps_open",     // output folder: sites/compare_gaps_open/
+  "expnr": "202",                  // uDALES experiment number: geom.202.stl, veg.inp.202, ...
+  "corners": [[-0.2000, 51.4900],  // Earl's Court, [longitude, latitude]:
+              [-0.1920, 51.4960]], //   Victorian terraces with narrow gaps between them
+  "crs": "auto",                   // metric projection: UTM zone of the site
+  "snap_m": 2.0,                   // domain size rounded up to a multiple of this (= dx)
+  "dx": 2.0,                       // grid spacing [m]; dz = dx
+  "zsize": 96.0,                   // domain height [m], same in both twins so they share one grid
+                                   //   (the 96 m minimum; tallest building here is ~27 m)
+  "udales_tools": "F:/stl/u-dales/tools/python",  // CHANGE: <your u-dales clone>/tools/python
+  "edge_buildings": "extend",      // periodic domain: edge buildings kept whole, domain grown to fit
+
+  "buildings": {
+    "height_source": "lidar",      // roof height from England EA LiDAR (DSM - DTM), auto-downloaded
+    "fill_gaps": false             // <-- THE DIFFERENCE: leave sub-grid gaps open
+  },
+  "vegetation": {"enabled": true}  // trees from the England EA LiDAR vegetation model (default)
+}

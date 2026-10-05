@@ -1,0 +1,145 @@
+// Example case: South Kensington
+//
+// Every parameter is listed with its meaning after the "//". Values are the
+// defaults except where a comment says "(example; default ...)". To make your
+// own site: copy this file, change "name" and "corners", and delete any lines
+// you don't need (missing = default).
+// Write file paths with / (e.g. "C:/data/tile.laz"), not \.
+// Run:   .venv\Scripts\python -m udales_geo configs\example.jsonc
+{
+  // ======================== site & grid ========================
+  "name": "example",               // output folder: sites/<name>/
+  "corners": [[-0.1795, 51.4975],  // two OPPOSITE corners of the area, [longitude, latitude].
+              [-0.1715, 51.5035]], //   openstreetmap.org shows #map=zoom/LAT/LON (latitude FIRST) — swap them
+  "crs": "auto",                   // map projection in metres; "auto" = UTM zone of the site. Or e.g. "EPSG:27700"
+  "snap_m": 2.0,                   // (example; default 1.0) the domain is enlarged (never shrunk) to a
+                                   //   multiple of this: use dx, or n x dx for core counts dividing by n
+  "dx": 2.0,                       // horizontal grid spacing [m] (dx = dy)
+  "dz": null,                      // vertical grid spacing [m]; null = same as dx
+  "zsize": null,                   // domain height [m]; null = max(96, 3 x tallest building)
+  "expnr": "001",                  // uDALES experiment number, used in file names (3 digits)
+  "udales_tools": "F:/stl/u-dales/tools/python",  // CHANGE: <your u-dales clone>/tools/python
+                                                  //   (or delete and set the UDALES_TOOLS environment variable)
+  "output_dir": null,              // null = sites/<name>/ next to the configs folder
+
+  // ======================== buildings on the domain edge ========================
+  "edge_buildings": "extend",      // (example; default "clip")
+                                   // "clip"   = cut buildings at the edge (inflow/outflow domains)
+                                   // "extend" = PERIODIC domains: keep edge buildings whole and grow
+                                   //            the domain outward slightly to fit them
+  "edge_min_inside": 0.5,          // extend: an edge building is kept if at least this fraction of it
+                                   //   lies inside your box, otherwise removed whole (0 = keep all)
+  "edge_clearance_m": null,        // extend: open ground between buildings and the edge [m]; null = dx
+                                   //   (so buildings across the periodic seam are >= 2 dx apart)
+  "edge_max_extend_m": 50.0,       // extend: stop with a message if a side would grow more than this [m]
+
+  // ======================== buildings (from OpenStreetMap) ========================
+  "buildings": {
+    "default_height": 10.0,        // [m] for buildings with no height in OpenStreetMap
+    "min_height": 2.0,             // [m] buildings lower than this are left out (a footprint LiDAR sees
+                                   //   lower than this keeps only an OSM height, else it is left out)
+    "min_area": 1.0,               // [m2] footprints smaller than this are left out
+    "max_plausible_height": 300.0, // [m] heights above this are capped
+    "height_attribute": "height",  // property holding the height in buildings_osm.geojson
+                                   //   (use this name when you add buildings in QGIS)
+    "simplify_tolerance": 0.0,     // [m] smooth footprint outlines; 0 = keep OSM shapes exactly
+
+    // --- building heights from LiDAR (priority: LiDAR > OSM height > default_height) ---
+    "height_source": "auto",       // "auto"  = LiDAR where available (your files below, or automatic in
+                                   //           England, Netherlands, Flanders/Brussels, France), else OSM
+                                   // "lidar" = LiDAR required (stop if none); "osm" = never use LiDAR
+    "lidar_source": "auto",        // automatic download: "auto" picks by location, or force one of
+                                   //   "england", "netherlands", "flanders" (incl. Brussels), "france"
+                                   //   ("england_tiles" = same data as 5 km zips, backup route)
+    "dsm_file": null,              // your own surface-height GeoTIFF (roofs included), any projection ...
+    "dtm_file": null,              //   ... plus the bare-ground GeoTIFF; height = DSM - DTM (overrides lidar_source)
+    "height_percentile": 92.0,     // building height = this percentile of the heights inside its footprint
+    "lidar_inset_m": 1.0,          // [m] footprint shrunk by this before sampling (skips walls/eaves)
+    "lidar_min_pixels": 10,        // fewer 1 m pixels inside a footprint -> OSM / default height instead
+    "las_dir": null,               // LEGACY alternative to DSM/DTM: folder of classified .las/.laz point
+                                   //   clouds. Not reprojected (must be in the site CRS) and used
+                                   //   whenever set, even with height_source "osm". Untested on real data
+    "las_min_points": 5,           // point clouds: fewer points inside a footprint -> OSM / default height
+    "las_ground_level": "auto",    // "auto" = ground from nearby ground points, or a number [m]
+    "las_building_classes": [6],   // LAS classification codes of buildings
+    "las_ground_classes": [2],     // LAS classification codes of ground
+    "las_ground_buffer": 10.0,     // [m] search distance for ground points around each building
+
+    // --- gaps narrower than the grid (matters most for heat / energy-balance runs) ---
+    "fill_gaps": true,             // fill gaps between buildings too narrow for the grid to see: the walls
+                                   //   facing them would get no heat or momentum exchange in uDALES.
+                                   //   Fills are as tall as the lower neighbour; see gap_fills.geojson
+    "gap_fill_width_dx": 1.0,      // fill gaps narrower than this many dx. 2 = also fill 1-2 cell
+                                   //   light-wells and passages (resolved, but poorly)
+
+    // --- fit the grid (matters for stability: uDALES issue #367) ---
+    "fill_courtyards": true,       // fill courtyards / light-wells the grid sees as enclosed and too narrow
+                                   //   (no full N x N block of fluid cells on some level), up to the lowest
+                                   //   roof around them; see courtyard_fills.geojson
+    "courtyard_min_cells": 3,      // N above (#367 uses 3)
+    "drop_unseen_buildings": true, // drop buildings (groups of touching ones) that hold no grid-cell
+                                   //   centre: invisible to uDALES, their facets would get no fluxes
+
+    // --- mesh generation (advanced; leave as is) ---
+    "method": "surface",           // "surface" = one watertight city surface (recommended); "extrude" = old method
+    "partition_grid_m": 25.03,     // [m] helper grid for meshing; odd value on purpose (avoids data-aligned edges)
+    "boundary_inset": 0.02,        // [m] footprints are kept this far inside the domain edge
+    "snap_precision": 0.01,        // [m] coordinate grid for overlaps, fills and meshing (the domain corner
+                                   //   is put on it too, so no hair cracks open between fills and buildings)
+    "overlap_min_part_area": 1.0,  // [m2] leftover pieces of overlapping footprints smaller than this are dropped
+    "max_pathological_edges": 8,   // tolerated number of unusual mesh edges before the STL is rejected
+    "max_ground_missing_pct": 0.5, // [%] warn if more ground area than this is missing from the mesh
+    "allow_invalid": false,        // true = keep an STL even if uDALES's check rejects it (debugging only)
+    "ground_edgelength": 5.0,      // [m] "extrude" method only: ground triangle size
+    "edge_max_len": null,          // [m] "extrude" method only: subdivide long building edges
+    "ground_triangle_options": null // "extrude" method only: Triangle library options
+  },
+
+  // ======================== vegetation (trees) ========================
+  "vegetation": {"enabled": true, // (example; default: no vegetation section = buildings only)
+
+    // --- where tree heights come from ---
+    "source": "auto",              // "auto"   = lidar if available, else global
+                                   // "lidar"  = your files below, or automatic download in England
+                                   // "global" = Meta/WRI world tree-height map (estimated from satellite images)
+                                   // "file"   = use "trees_file" as-is
+    "chm_file": null,              // a tree-height GeoTIFF you already have (lidar)
+    "las_files": [],               // classified .las/.laz point clouds (lidar) — e.g. Australia, ordered at
+                                   //   https://elevation.fsdf.org.au ...
+    "dtm_file": null,              //   ... together with the matching ground-height (DTM/DEM) GeoTIFF
+    "las_crs": null,               // only if the LAS files don't state their projection, e.g. "EPSG:7856"
+    "veg_classes": [3, 4, 5],      // LAS classification codes of vegetation (low, medium, high)
+    "ea_year": null,               // England: survey year to download; null = latest
+    "trees_file": null,            // source "file": path to a trees.geojson
+
+    // --- finding individual trees ---
+    "chm_res": 1.0,                // [m] resolution of the tree-height map used
+    "min_canopy_height": 3.0,      // [m] lower vegetation is ignored
+    "smooth_sigma_m": 1.0,         // [m] smoothing before looking for tree tops
+    "min_peak_distance_m": 3.0,    // [m] minimum distance between two tree tops
+    "min_crown_area": 5.0,         // [m2] smaller crowns are dropped
+    "max_crown_area": 2000.0,      // [m2] larger crowns (woods that can't be split) are dropped
+    "mask_buildings_buffer_m": 1.0,// [m] no trees within this distance of buildings
+    "cap_radius_to_buildings": false, // true = shrink crowns so they never touch a building
+
+    // --- tree shape ---
+    "trunk_offset": 2.0,           // [m] height of the crown base above the ground
+    "shape": "hexagon",            // (example; default "box") "box" (grid-cell block) | "hexagon" | "circle"
+    "hex_radius": "circumscribed", // hexagon only: "circumscribed" (corners on the crown radius) | "inscribed" (larger)
+
+    // --- uDALES output ---
+    "voxel_method": "exact",       // (example; default "udprep")
+                                   // "udprep" = same cells as uDALES's own tool (crowns ~1 cell wider per side)
+                                   // "exact"  = only cells inside the tree (true volume)
+    "drop_cells_in_buildings": true, // remove tree cells that fall inside buildings
+    "udprep_check": true,          // re-run uDALES's own converter and confirm the files match
+    "params": {                    // canopy parameters written to veg_params.inp / &TREES (London plane tree)
+      "lad": 1.0,                  // leaf area density [m2/m3]
+      "cd": 0.2,                   // drag coefficient [-]
+      "ud": 0.005,                 // deposition velocity [m/s]
+      "dec": 0.40,                 // radiation extinction coefficient [-]
+      "lsize": 0.15,               // leaf size [m]
+      "r_s": 200.0                 // stomatal resistance [s/m]
+    }
+  }
+}

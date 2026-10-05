@@ -1,0 +1,27 @@
+// Comparison case: building heights from OpenStreetMap (South Kensington)
+//
+// Twin: compare_heights_lidar.jsonc. The ONE setting that differs is
+//   buildings.height_source = "osm" here, "lidar" in the twin
+// (plus name/expnr). Same site, trees and grid, so any difference in the
+// flow comes from the building heights alone.
+// Every parameter not listed here is at its default (see configs/example.jsonc).
+// Run:   .venv\Scripts\python -m udales_geo configs\compare_heights_osm.jsonc
+{
+  "name": "compare_heights_osm",   // output folder: sites/compare_heights_osm/
+  "expnr": "101",                  // uDALES experiment number: geom.101.stl, veg.inp.101, ...
+  "corners": [[-0.1795, 51.4975],  // South Kensington, [longitude, latitude]
+              [-0.1715, 51.5035]], //   (same area as example.jsonc)
+  "crs": "auto",                   // metric projection: UTM zone of the site
+  "snap_m": 2.0,                   // domain size rounded up to a multiple of this (= dx)
+  "dx": 2.0,                       // grid spacing [m]; dz = dx
+  "zsize": 264.0,                  // domain height [m], same in both twins so they share one grid
+                                   //   (3 x 87.5 m, the tallest building of the pair (OSM case), rounded up to dz)
+  "udales_tools": "F:/stl/u-dales/tools/python",  // CHANGE: <your u-dales clone>/tools/python
+  "edge_buildings": "extend",      // periodic domain: edge buildings kept whole, domain grown to fit
+
+  "buildings": {
+    "height_source": "osm",        // <-- THE DIFFERENCE: OSM height tag, else levels x 3 m, else 10 m
+    "fill_gaps": true              // fill gaps narrower than dx (default)
+  },
+  "vegetation": {"enabled": true}  // trees from the England EA LiDAR vegetation model (default)
+}
