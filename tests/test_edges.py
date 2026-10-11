@@ -79,7 +79,8 @@ def test_unknown_mode_is_an_error(region):
 
 def test_lidar_height_is_roof_percentile_not_eaves():
     """A 20x20 m building: roof at 15 m, a 1 m ring of 5 m eaves/ground-edge
-    pixels. The 1 m inset skips the ring; the result is the roof height."""
+    pixels (19 % of the footprint). The 92nd percentile is the roof height,
+    with or without the 1 m inset (this test does not isolate the inset)."""
     import numpy as np
     from affine import Affine
     from shapely.geometry import box

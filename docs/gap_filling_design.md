@@ -43,6 +43,14 @@ A fixed 0.25 m does almost nothing on real data. Pairwise nearest-point
 bridges would cross a third building in 294 of 742 ic pairs.
 Picture: `sites/ic_demo/subgrid_gaps_dx2.png`.
 
+*Sections 3–6 are the design of 2026-09-28, before implementation; what was
+built is §9 and AGENTS.md stage 10. Differences: edges are always open
+ground (no periodic copies), r = W/2 − 1 mm (a gap of exactly W stays open),
+fills carry only `gap_fill: true` (no `kind`, `neighbours`, `height_donor`
+or `width_est`), and none of the config keys `gap_fill_height`,
+`gap_fill_edges`, `min_face_area` exists (unknown keys are ignored
+silently; the face-area gate is the constant `buildings.MIN_FACE_AREA`).*
+
 ## 3. Algorithm — mitre opening of the open ground (`udales_geo/gaps.py`)
 
 1. U = union of snapped footprints; D = domain box (padded by W for open
@@ -144,7 +152,13 @@ The §7 questions were not answered; the recommended defaults were taken.
   - gate: the build fails if any face of the saved (float32) STL is under
     10⁻⁶ m² (`buildings.MIN_FACE_AREA`), naming the location.
 - Not built: the c-grid raster QA in the report, the overlay PNG, per-kind
-  piece classification, the stale-case-file reminder.
+  piece classification, the fill properties `neighbours` / `height_donor` /
+  `width_est` (the sidecar flags only `gap_fill` / `courtyard_fill` /
+  `plug`, AGENTS.md §4.4), the stale-case-file reminder.
+- Limitation (code review 2026-10-11): a wedge between two walls meeting at
+  more than about 23° is regrown exactly by the mitre opening (shapely's
+  mitre_limit 5), so its narrow tip is not filled and `remaining_narrow_m2`
+  does not see it.
 
 Measured (dx = 2 m, W = dx unless noted). "No-air walls" = wall area whose
 cell is solid and has no fluid neighbour (4 sides + above), a proxy for the

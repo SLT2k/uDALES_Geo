@@ -10,7 +10,7 @@
   "name": "compare_heights_lidar", // output folder: sites/compare_heights_lidar/
   "expnr": "102",                  // uDALES experiment number: geom.102.stl, veg.inp.102, ...
   "corners": [[-0.1795, 51.4975],  // South Kensington, [longitude, latitude]
-              [-0.1715, 51.5035]], //   (same area as example.jsonc)
+              [-0.1715, 51.5035]], //   (the example site until 2026-10-11)
   "crs": "auto",                   // metric projection: UTM zone of the site
   "snap_m": 2.0,                   // domain size rounded up to a multiple of this (= dx)
   "dx": 2.0,                       // grid spacing [m]; dz = dx

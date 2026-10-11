@@ -246,7 +246,11 @@ def benign_corner_contacts(mesh):
 
 def wall_orientation_selfcheck(mesh, fph_sim) -> float:
     """Fraction of vertical faces whose normal points AWAY from the nearest
-    footprint centroid (should be ~1.0). Cheap sanity metric for reports."""
+    footprint centroid. A rough heuristic only: correct meshes score 0.6-0.75
+    (the nearest centroid is often a neighbour's, e.g. along terraces), so it
+    cannot tell a correct mesh from one with some inverted walls. Kept as a
+    report number; the orientation itself is right by construction (walls
+    face away from the taller side, see build_city_surface step 4)."""
     vertical = np.abs(mesh.face_normals[:, 2]) < 1e-6
     if not vertical.any():
         return 1.0

@@ -269,8 +269,10 @@ def fill_holes(dtm: np.ndarray, max_px: int = 150) -> tuple:
 # --------------------------------------------------------------------------
 def fetch_ndsm(site: SiteRaster, cache_dir: Path, choice: str = "auto"):
     """nDSM (height above ground) on the site grid from the first source that
-    has data here. Returns (ndsm, provenance) or None (no source applies).
-    A source named explicitly by `choice` must work, or this raises."""
+    has data here. Returns (ndsm, provenance), or (None, info) when no source
+    delivered: info names the sources tried and why each failed (empty when
+    no source covers the site). A source named explicitly by `choice` must
+    work, or this raises."""
     from pyproj import Transformer
     if choice != "auto":
         if choice not in SOURCE_NAMES:
@@ -312,4 +314,4 @@ def fetch_ndsm(site: SiteRaster, cache_dir: Path, choice: str = "auto"):
         return ndsm, prov
     if failures:
         print("[lidar] WARNING: no LiDAR source delivered data here: " + "; ".join(failures))
-    return None
+    return None, {"lidar_tried": [s["name"] for s in candidates], "lidar_failures": failures}

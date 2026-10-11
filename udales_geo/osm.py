@@ -1,14 +1,18 @@
 """OSM building-footprint fetching via the Overpass API.
 
-Ported verbatim from the field-proven fetcher in the stl workspace
+Ported from the field-proven fetcher in the stl workspace
 (download/get_osm_footprints.py): polygon assembly for multipolygon
 relations, 4-corner bbox reprojection (grid convergence), height from the
-'height' tag when parseable else 'building:levels' * 3 m. Pure module —
-the CLI lives in build.py / __main__.py.
+'height' tag when parseable else 'building:levels' * 3 m. Changed since
+(code review 2026-10): building=no is left out, a courtyard ring that is a
+building itself is kept, an incomplete Overpass answer is rejected, and
+only finite positive heights are parsed. Pure module — the CLI lives in
+build.py / __main__.py.
 """
 from __future__ import annotations
 
 import json
+import math
 import time
 import urllib.request
 
@@ -24,20 +28,27 @@ OVERPASS_ENDPOINTS = [
 USER_AGENT = "udales-geo (uDALES case preparation; github.com/uDALES)"
 
 
+def _positive(text):
+    """float(text) if it is a finite number > 0, else None ('nan', 'inf', '-3'
+    and '0' are tagged in OSM too)."""
+    try:
+        v = float(text)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) and v > 0 else None
+
+
 def parse_height(tags: dict):
-    h = tags.get("height")
-    if h:
-        try:
-            return float(str(h).lower().replace("m", "").strip())
-        except ValueError:
-            pass
-    lv = tags.get("building:levels")
-    if lv:
-        try:
-            return float(lv) * 3.0
-        except ValueError:
-            pass
-    return None
+    """'height' in metres ('12', '12 m'; any other unit such as '1200 mm' or
+    feet is not parsed), else 'building:levels' * 3 m, else None."""
+    h = str(tags.get("height") or "").strip().lower()
+    if h.endswith("m") and not h.endswith("mm"):
+        h = h[:-1].strip()
+    v = _positive(h)
+    if v is not None:
+        return v
+    lv = _positive(tags.get("building:levels"))
+    return lv * 3.0 if lv is not None else None
 
 
 def fetch(bbox_proj, crs, margin=25.0):
@@ -52,11 +63,13 @@ def fetch(bbox_proj, crs, margin=25.0):
     lons = [ll[0] for ll in lls]
     lats = [ll[1] for ll in lls]
     bbox = f"{min(lats)},{min(lons)},{max(lats)},{max(lons)}"
+    # building=no marks "not a building" (car parks, pitches): left out here
+    # and again in to_geojson
     query = f"""
 [out:json][timeout:120];
 (
-  way["building"]({bbox});
-  relation["building"]["type"="multipolygon"]({bbox});
+  way["building"]["building"!="no"]({bbox});
+  relation["building"]["building"!="no"]["type"="multipolygon"]({bbox});
 );
 out body; >; out skel qt;
 """
@@ -66,7 +79,13 @@ out body; >; out skel qt;
                 url, data=query.encode(), headers={"User-Agent": USER_AGENT})
             try:
                 with urllib.request.urlopen(req, timeout=180) as r:
-                    return json.loads(r.read())
+                    data = json.loads(r.read())
+                # Overpass reports a timeout or out-of-memory with HTTP 200, a
+                # "remark" and a truncated element list: never use that answer
+                remark = str(data.get("remark", ""))
+                if "runtime error" in remark.lower():
+                    raise RuntimeError(f"incomplete answer ({remark.strip()[:120]})")
+                return data
             except Exception as e:
                 host = url.split("/")[2]
                 print(f"[osm] {host} failed: {e}" +
@@ -74,10 +93,13 @@ out body; >; out skel qt;
         if round_ == 0:
             print("[osm] all mirrors failed once; waiting 15 s and retrying")
             time.sleep(15)
+    record = json.dumps({"crs": crs, "bbox": [round(v, 3) for v in bbox_proj]})
     raise RuntimeError(
         "Overpass download failed on all mirrors — the service may be down "
-        "or your network blocked; retry later, or drop a buildings GeoJSON "
-        "into the site folder yourself (buildings_osm.geojson)")
+        "or your network blocked; retry later. To use buildings from elsewhere, "
+        f"put them in the site folder as buildings_osm.geojson in {crs} metres "
+        "(not lon/lat), with a buildings_osm.fetch.json next to it containing "
+        f"exactly: {record}")
 
 
 def assemble_rings(node_lists):
@@ -132,12 +154,23 @@ def _holes_per_outer(outer_xy, inner_xy):
     return holes, n_orphan
 
 
+def _not_a_building(element) -> bool:
+    """building=no: OSM's tag for 'this area is not a building'."""
+    return str(element.get("tags", {}).get("building", "")).strip().lower() == "no"
+
+
 def to_geojson(data, crs):
     """Overpass JSON -> GeoJSON FeatureCollection in the projected CRS.
     Heights land in the 'height' property; ids are stable ('way/N', 'rel/N')."""
     to_proj = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
     nodes = {e["id"]: (e["lon"], e["lat"]) for e in data["elements"] if e["type"] == "node"}
-    ways = {e["id"]: e for e in data["elements"] if e["type"] == "way"}
+    # 'out body; >; out skel' prints a relation's member ways a second time
+    # without tags: keep the tagged copy (a courtyard ring that is a building
+    # itself is matched directly AND is a member)
+    ways = {}
+    for e in data["elements"]:
+        if e["type"] == "way" and ("tags" in e or e["id"] not in ways):
+            ways[e["id"]] = e
 
     def to_coords(node_ids):
         pts = [nodes[n] for n in node_ids if n in nodes]
@@ -147,15 +180,19 @@ def to_geojson(data, crs):
     used_in_rel = set()
     n_rel_dropped = n_orphan_holes = 0
     for e in data["elements"]:
-        if e["type"] != "relation":
+        if e["type"] != "relation" or _not_a_building(e):
             continue
         outer_ids, inner_ids = [], []
         for m in e.get("members", []):
             if m["type"] != "way" or m["ref"] not in ways:
                 continue
-            used_in_rel.add(m["ref"])
-            (outer_ids if m.get("role") != "inner" else inner_ids).append(
-                ways[m["ref"]]["nodes"])
+            if m.get("role") == "inner":
+                # an inner way tagged as a building itself (a lower building in
+                # the courtyard) is still emitted by the way loop below
+                inner_ids.append(ways[m["ref"]]["nodes"])
+            else:
+                used_in_rel.add(m["ref"])
+                outer_ids.append(ways[m["ref"]]["nodes"])
         outers, d1 = assemble_rings(outer_ids)
         inners, d2 = assemble_rings(inner_ids)
         if d1 or d2:
@@ -177,7 +214,7 @@ def to_geojson(data, crs):
         print(f"[osm] note: {n_orphan_holes} courtyard rings not inside any outline of their "
               f"relation dropped")
     for wid, w in ways.items():
-        if wid in used_in_rel or "tags" not in w or "building" not in w.get("tags", {}):
+        if wid in used_in_rel or "building" not in w.get("tags", {}) or _not_a_building(w):
             continue
         r = to_coords(w["nodes"])
         if len(r) < 4:

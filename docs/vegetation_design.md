@@ -14,7 +14,31 @@ verified.*
 > until a UI exists — the hook is `trees.geojson` + `source: "file"`.
 > Found while testing: udprep's `load_stl` dilates crowns ~1 cell per side
 > (cell/solid volume 1.48 London box, 1.73 TUS hexagon) → `voxel_method:
-> "udprep"` (default, parity) vs `"exact"` (paper). See README "Vegetation".
+> "udprep"` (default, parity) vs `"exact"` (paper). See README, "Main
+> options in brief", Trees.
+>
+> **2026-10-11: trees cut around buildings** (answers question 5 below).
+> The owner saw tree solids entering buildings in ParaView (Manhattan
+> example: 139 of 255 crowns, 4 % of the tree volume; the vegetation cells
+> were already clean, the STL was not). Cause: the crown circle is drawn
+> around the centroid of a canopy patch that the building mask had cut off
+> at the wall, so the circle reaches back into the building; the box
+> snapping adds up to a cell. Xinzhe's cap (0.95 × distance to the nearest
+> building) would have cost 29 % of the crown area here and does not work
+> with the box shape (82 of 243 still penetrate after snapping). Chosen:
+> each crown's plan polygon is cut by the final buildings and fills whose
+> roof is above the crown base, shrunk by 1 mm, more where a corner would
+> repeat another tree's (two
+> crowns cut by the same corner share it and, with the same base and top,
+> the vertical edge through it; udprep merges vertices and rejects an edge
+> used by four faces), then extruded
+> (`trees.tree_solid`); the cells come from the same cut plan. Canopy above
+> a roof that lies between the crown base and the tree top is lost with it
+> (1 % of the volume on the example; stepped solids were not worth it).
+> Also found and fixed: the canopy map was masked only by the modelled
+> buildings, so OSM buildings removed at the domain edge kept their roof
+> "canopy" and became trees (33 of 255 on the example); now all OSM
+> buildings in the domain mask the map and drop trees centred on them.
 
 ## 1. Xinzhe's chain in one paragraph
 
@@ -35,7 +59,7 @@ z = 2 m (absolute) to max height (s4:1090-1124). Outputs trees.stl + CSV only.
 |---|---|---|
 | Input / CHM derivation | **Xinzhe** | builds CHM from vegetation-class returns only — buildings never contaminate it; safe multi-tile merge; inspectable CHM + per-tree CSV |
 | Segmentation | ours | metre-based σ/spacing; per-connected-component peaks (his single boolean label can under-segment touching crowns and drop small disconnected ones ≈5–9 m²) |
-| Filters vs buildings | mixed | his centroid-in-building filter + no-overlap guarantee; but his isotropic radius cap strips street-side canopy near façades. Ours only drops cells inside building columns |
+| Filters vs buildings | mixed | his centroid-in-building filter + no-overlap guarantee; but his isotropic radius cap strips street-side canopy near façades. Ours (since 2026-10-11) cuts each crown's plan around the buildings instead, and drops cells inside building columns |
 | Crown geometry | ours | paper's inscribed-radius hexagon (110 % of circle area); his circumradius gives 83 % → **75 % of our canopy area/volume** (less for capped trees) |
 | Height / trunk / terrain | tie | both fixed 2 m base, flat top, no LAD/crown base |
 | Edge crowns & canopy > 2000 m² | tie | both wrong for periodic domains; both silently drop parks/woodland |
@@ -77,6 +101,12 @@ false for the chain as a whole.
 
 ## 5. Recommended build (`udales_geo/vegetation.py`, ≈4–5 days)
 
+*Pre-implementation sketch (2026-09-28), kept for the record. The implemented
+keys, values and file names are in `configs/example.jsonc` and AGENTS.md
+stage 15: `source` auto | lidar | global | file | none, `hex_radius` (not
+`hex_radius_rule`, default circumscribed), `min_peak_distance_m` 3.0;
+outputs `chm.tif`, `canopy.provenance.json`, `vegetation.report.json`.*
+
 Port from ours: per-component watershed, voxelize.py (udprep-exact, ids,
 building-cell drop, veg.inp/veg_params.inp/&TREES).
 Port from Xinzhe: LAS→CHM (classes 3/4/5, max-Z gridding, minus DTM, at
@@ -112,6 +142,9 @@ Single-process, windowed reads only (this PC is unstable under load).
 2. Meta CHMv2 as default no-LiDAR source, or opt-in (default no trees)? Validate against EA VOM at IC first?
 3. Crown rule: inscribed (paper) or area-preserving?
 4. Canopy > 2000 m² (parks): split, keep as block, or drop?
-5. Near buildings: per-cell clip (ours) or whole-crown cap (his)?
-6. Periodic domains → edge crowns wrap?
-7. UNSW: manual ELVIS order (~2 × 255 MB) or Meta CHMv2? (configs/unsw_demo.json currently holds TUS corners.)
+5. Near buildings: per-cell clip (ours) or whole-crown cap (his)? →
+   *answered 2026-10-11: neither; the crown plan is cut by the buildings
+   (status note at the top).*
+6. Periodic domains → edge crowns wrap? *(Not built: since 2026-10-11 a
+   crown is clipped at the domain edge, AGENTS.md stage 15d.)*
+7. UNSW: manual ELVIS order (~2 × 255 MB) or Meta CHMv2?

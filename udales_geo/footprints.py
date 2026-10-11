@@ -81,13 +81,14 @@ def load_footprints(path: str | Path,
                     bbox: tuple | None = None,
                     boundary_inset: float = 0.0,
                     min_area: float = 0.0,
-                    simplify_tolerance: float = 0.0):
+                    simplify_tolerance: float = 0.0,
+                    quiet: bool = False):
     """Return list of (Polygon, properties) in target_crs, clipped to bbox.
 
     bbox = (xmin, ymin, xmax, ymax) in target_crs. The clip window is inset by
     `boundary_inset` so no clipped wall ends up exactly flush with the domain
     boundary (udgeom.add_ground's constrained triangulation fails on flush
-    walls; verified on the AU-Syd case).
+    walls; verified on the AU-Syd case). quiet: no summary line.
     """
     path = Path(path)
     src_crs = source_crs or _detect_crs(path) or target_crs
@@ -131,9 +132,10 @@ def load_footprints(path: str | Path,
                 continue
             out.append((part, props))
 
-    print(f"[footprints] {path.name}: read {n_read} features -> kept {len(out)} polygons "
-          f"(clipped away {n_clipped_away}, below min_area {n_small}, "
-          f"non-polygon parts dropped {n_nonpoly}); CRS {src_crs} -> {target_crs}")
+    if not quiet:
+        print(f"[footprints] {path.name}: read {n_read} features -> kept {len(out)} polygons "
+              f"(clipped away {n_clipped_away}, below min_area {n_small}, "
+              f"non-polygon parts dropped {n_nonpoly}); CRS {src_crs} -> {target_crs}")
     return out
 
 

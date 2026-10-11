@@ -67,6 +67,8 @@ def apply_edge_policy(features: list, region, mode: str, clearance: float,
     nx0, ny0, nx1, ny1 = x0, y0, x1, y1
     n_cross = n_outside = 0
     for f in features:
+        if not f.get("geometry"):      # QGIS writes "geometry": null for a deleted shape
+            continue                   # (footprints.load_footprints skips these too)
         g = _geom(f)
         if g.is_empty or g.area < min_area or not g.intersects(B):
             continue

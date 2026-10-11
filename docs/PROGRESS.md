@@ -1,12 +1,13 @@
 # uDALES-Geo: where the project stands
 
-*Status on 2026-10-05, after the code-review round. This page records what
-has been built, how it was checked, and what is still open. For how to use
-the tool see [README.md](../README.md); for how each stage works in detail see
-[AGENTS.md](../AGENTS.md). Numbers below come from the site reports in
-`sites/` (rebuilt 2026-10-05 02:14–02:15) and from real uDALES preprocessing
-runs on this PC; where a number comes from somewhere else, the source is
-named.*
+*Status on 2026-10-11, after the tree cut and the full independent review (§2, 2026-10-11). This page records
+what has been built, how it was checked, and what is still open. For how to
+use the tool see [README.md](../README.md); for how each stage works in detail
+see [AGENTS.md](../AGENTS.md). Numbers below come from the site reports in
+`sites/` (all five rebuilt 2026-10-11 at 12:00 with the final code, geometry
+identical to the 2026-10-05 builds; §4.6) and from
+real uDALES preprocessing runs on this PC; where a number comes from
+somewhere else, the source is named.*
 
 ## 1. Summary
 
@@ -33,7 +34,10 @@ not done: facet types (a backend exists, deliberately not switched on), facet
 size control (walls are single full-height quads), and the radiation edge
 bias of periodic domains (a uDALES-side limitation). No uDALES solver run
 with the tool's output is recorded yet. The project is MIT licensed and
-went into a private GitHub repository on 2026-10-05.
+went into a private GitHub repository on 2026-10-05. Since 2026-10-11 the
+tree solids are cut around the buildings (they used to enter them in
+`trees.stl`; the vegetation cells were already clean) and the canopy map is
+masked by every OSM building in the domain, not only the modelled ones.
 
 ## 2. Timeline
 
@@ -203,12 +207,122 @@ random dense layouts (now `tools/geometry_stress.py`). Fixed:
   updated.
 - 64 offline test cases (10 new regression tests from the review). Stress
   test: hair cracks in 2 and 2 of 150 random layouts per seed (131 of 150
-  before the fixes), at most 0.1 m² (§4.4).
+  before the fixes), at most 0.27 m² (§4.4).
 - All 5 sites rebuilt (02:14–02:15); the three full sites rerun through real
   udprep IBM (cases 612–614) and two 200 m sub-sites through full lEB
   preprocessing (cases 301–302), all checked with `case_check` (§4.2, §4.3).
 - `tools/udprep_check/` (`make_case.py`, `run_udprep.py`, `README.md`):
   repository scripts to run uDALES' own udprep on a built site.
+
+**2026-10-11 — trees cut around buildings.** The owner saw tree solids
+entering buildings in ParaView (`sites/example`, now a West Village,
+Manhattan site: 340 buildings, OSM heights, Meta canopy map, box trees,
+`voxel_method "exact"`). A four-agent diagnosis measured it: 139 of 255 box
+solids intersected a building in plan (1093 m², 4.2 % of the tree volume,
+all of it wall penetration since every building there is taller than the
+2 m crown base); the vegetation cells were already clean (0 of 32 638
+inside a building, 1409 dropped), so only `trees.stl` / `trees.<expnr>.stl`
+was wrong — which matters for `itree_mode = 2`, where udprep regenerates
+the cells from that file with no building filter. Cause: the crown circle
+is drawn around the centroid of a canopy patch that the building mask cut
+off at the wall, so it reaches back into the building (78 % of the overlap);
+the box snapping adds up to half a cell per side (the rest). The coworker's
+chain (`F:\stl\Xinzhe_stl`, audited in full) caps every crown at 0.95 × the
+distance to the nearest building: it keeps his hexagons out of buildings by
+construction, but on this site it would remove 29 % of all crown area and
+12 trees, and with our box shape 82 of 243 trees would still penetrate
+after snapping. Done instead (`trees.tree_solid`): each crown's plan is cut
+by the final buildings and fills whose roof is above the crown base, shrunk
+by 1 mm, more in 1 mm steps where a corner would repeat another tree's
+(two crowns cut by the same building corner share it and, with the same
+base and top, the vertical edge through it: udprep loads the STL with
+vertices merged and rejects an edge used by four faces), then
+extruded; the exact cells come from the cut plan (the old convex-hull test
+was wrong for non-convex prisms); `trees_plan.geojson` holds the outlines
+and `overview.png` draws them. Also found and fixed: the canopy map was
+masked by the modelled buildings only, so OSM buildings the edge policy
+removed kept their roof "canopy" and became trees (33 of 255, 13 %);
+`read_trees_geojson` crashed on `"base": null` from QGIS; the
+`namoptions.trees` note claimed udprep regenerates the same cells (false
+for `"exact"`: 54 816 vs 32 638). Example rebuilt: 229 trees, 136 cut
+(1100 m² of plan), 1 removed; independent check: 0.000 m³ of tree solid
+inside buildings, closest solid 0.87 mm from a wall, 0 of 26 599 cells in a
+building, udprep cross-check consistent. 12 new test functions (64 → 76
+cases).
+
+**2026-10-11 (second part) — full independent review.** Thirteen reviewers
+(ten code lenses, three documentation lenses) read the whole repository as
+if it were not ours, and every finding went to two verifiers, one reading
+the code path and one reproducing the failure: 85 findings, 54 confirmed by
+both, 14 disputed, 4 refuted, 13 left unverified when the usage limit hit
+(those were checked by a reproducing test before fixing). Fixed (one
+regression test each, 51 new test cases, 127 in all; nine of the old
+defects re-inserted in memory to confirm their tests fail):
+- OSM: `building=no` areas (car parks, pitches) became 10 m blocks — now
+  left out; a courtyard ring tagged as a building itself was dropped — now
+  kept; an Overpass answer with a "runtime error" remark (truncated, HTTP
+  200) was cached as complete — now a failed server; `parse_height`
+  accepted `nan`, `inf`, negatives and read `1200 mm` as 1200 m.
+- Rasters: undeclared no-data (−9999, 32767, …) in your own DSM/DTM/CHM
+  went into heights and trees — every read now drops values outside
+  −500..9000 m before resampling, and canopy heights above 150 m are
+  no-data; a failed LiDAR download was recorded as a deliberate OSM run —
+  now `building_heights.lidar_tried` / `lidar_failures` and a WARNING; a
+  failed Meta tile silently became "no trees" — now an error (only a
+  missing tile, HTTP 404 at sea, is skipped); `chm.tif` was reused after a
+  change of canopy source — now keyed on the request; LAS coverage counted
+  cells with trees instead of cells with data; a cached EA error page made
+  every later run fail.
+- Geometry: a cell-square courtyard fill at the domain edge reached 2 cm
+  outside the domain. (The first review also proposed a 5 cm hair-crack
+  probe for the 1–3 cm slits found in built sites; the second review showed
+  it flags 10–12 of 150 stress layouts, 3 of 300 above the 1 m² error
+  threshold, so the 1 cm probe stays and the slits are a known issue,
+  AGENTS.md §7.1.)
+- Trees: box sides and tops on an exact tie (integer-metre canopy maps) were
+  rounded up or down by parity — now always up; crowns reached past the
+  domain edge — now clipped; the in-building cell filter missed centres
+  exactly on an outline (udprep counts them solid); a reused
+  `trees.geojson` was rewritten (hand edits lost) and the first run used
+  unrounded numbers; a `trees_file` in lon/lat silently gave no trees — now
+  a `ConfigError`; trees with r or h ≤ 0 were accepted.
+- Orchestration: `site.report.json` of an earlier run survived a failed
+  run; the report's `grid.dx` was the configured value, not xlen/itot;
+  `expnr` above 999 was accepted (uDALES cannot open the files); `null`
+  for `snap_m`, `dx`, `edge_*` crashed; `"enabled": "false"` (a string)
+  switched trees on; error line numbers were off after block comments;
+  corners across the 180th meridian picked the wrong UTM zone (now refused:
+  not supported); the dashed
+  "framed box" appeared on every `"extend"` run.
+- Tools: `case_check` crashed on a `solid_c.txt` from another grid (now exit
+  code 2); `make_case.py` silently skipped its namoptions insertions when
+  the template's spacing differed.
+- Docs: the README omitted `xlen`/`ylen` from the grid to copy into
+  `namoptions` (a template's domain size would have been kept), and the
+  `treesfile` needed whenever `ltrees` is on; stale figures and statements
+  across README, AGENTS.md, this page and the design documents.
+A second review of the whole uncommitted change (four lenses, two
+verifiers per finding: 22 confirmed, all small) found and fixed: a one-cell
+box crown nicked by a wall (or, at a non-dyadic dx, only touching a fill)
+was deleted whole — a piece is now dropped only if it is under one cell AND
+holds no cell centre (one tree per site was lost before); the
+courtyard-building OSM fix did not work on real answers (`out skel` repeats
+member ways untagged and the untagged copy won); the on-outline rule of the
+in-building cell filter missed centres at non-dyadic dx (centres now
+rounded like the outlines); canopy maps now drop values outside −150..150 m
+before resampling (a uint8 255 no-data would have been blended into tree
+tops); a failed vegetation stage now leaves no old veg files next to the
+new geometry; trees wholly outside the domain are counted as such, not as
+removed by buildings; several tests that could not fail were rewritten;
+documentation numbers updated. Existing sites keep their cached
+`buildings_osm.geojson` (with any `building=no` areas) until
+`--force-fetch`.
+Not changed (owner decisions or not defects): unknown config keys stay
+silent (the typo checker was removed on purpose); several features share
+an id for a relation with several outer rings (messages only); the domain
+is the box of the two given corners, so the other diagonal gives a box a
+few metres different (documented); wedge-shaped gaps above ~23° are not
+filled and hair-thin fills are not reported (documented, AGENTS.md §7.1).
 - `docs/PIPELINE.md` and `docs/GUIDE.md` deleted; their content is in
   `AGENTS.md` and `README.md`.
 
@@ -226,7 +340,7 @@ only**; **counted only**; **not started**.
 | OSM relation courtyards to the smallest containing outer ring | done, verified | 3 tests; Earl's Court relation 11373124 | fixed 2026-09-29 |
 | `edge_buildings: "extend"` (periodic) | done, verified | 6 tests; all 5 sites | South Kensington 530 × 690 → 562 × 702 m |
 | `edge_buildings: "clip"` (code default) | done | no current site uses it | cut buildings face unrelated ones across a periodic seam; grid fit still assumes periodic (§5.14) |
-| LiDAR heights, England WCS | done, verified | 4 sites (all but `compare_heights_osm`) | LiDAR − OSM median +3.8 m (S. Kensington), +4.6 m (Earl's Court) |
+| LiDAR heights, England WCS | done, verified | 3 sites (`compare_heights_lidar`, `compare_gaps_*`; the example too until 2026-10-11) | LiDAR − OSM median +3.8 m (S. Kensington), +4.6 m (Earl's Court) |
 | LiDAR heights, Netherlands / Flanders / France | done, verified | end to end 2026-09-28 (Amsterdam, Brussels, Paris; those sites since deleted) | Norway disabled |
 | LiDAR heights, `england_tiles` fallback | done, not run with current code | – | audit removal candidate |
 | Own `dsm_file` + `dtm_file` | done | used for the 200 m lEB sub-sites (§4.3) | the documented route outside the four countries |
@@ -235,7 +349,7 @@ only**; **counted only**; **not started**.
 | Overlap resolution, tallest first, 1 cm snap | done, verified | sites | |
 | Gap filling (< W = dx, layered heights) | done, verified | 9 test functions in `test_gaps.py`; real udprep | per-level claim fixed in the review; `gap_fill_width_dx` 2 also fills 1–2-cell slots |
 | Hair-crack fix (lattice, threading, final noding) | done, verified | real udprep: S. Kensington 32.4 → 0 m²; 3 offline tests; stress test | `SNAP_TOL` 0.999 |
-| Hair-crack check (`_hair_cracks`, 1 cm) | done, verified | 0 on all sites with gap filling on; used by 4 offline tests | stops the build with gap filling on from 1 m² of crack walls; warning below or with filling off |
+| Hair-crack check (`_hair_cracks`, 1 cm) | done, verified | 0 on all sites with gap filling on (rebuilt 2026-10-11); used by 5 offline tests, one a positive control; 1–3 cm slits pass unseen (AGENTS.md §7.1) | stops the build with gap filling on from 1 m² of crack walls; warning below or with filling off |
 | Narrow enclosed courtyards (#367) | done, verified | 9 tests; real udprep solid mask 43 / 229 / 297 → 0 narrow columns | udprep's solid tolerance; periodic labelling shared with `case_check`; overfill guard |
 | Grid fit uses dy = ylen / jtot | done | 1 test | equal to dx on all current sites |
 | Plugs at enclosed cell centres lying on an outline | done, verified | 2 tests; 1 plug at Earl's Court | round, only where solid all round |
@@ -243,10 +357,11 @@ only**; **counted only**; **not started**.
 | Open narrow slots (street cells not covered by a 3 × 3 fluid block) | counted only | census in `buildings.report.json` | §5.4 |
 | Mesher (planar partition, snap rounding, CDT, walls) | done, verified | all sites valid, 0.0 % ground missing | faces take the tallest footprint's height |
 | QA gate (`udgeom` check, float32 round trip, 1e-6 m² face gate) | done, verified | all sites | |
-| Trees from EA Vegetation Object Model | done, verified | 5 sites; udprep cross-check consistent | |
-| Trees from Meta/WRI CHMv2 (worldwide) | done | quadkey test; used during development 2026-09-28 | not used by current sites |
+| Trees from EA Vegetation Object Model | done, verified | the 4 London sites; udprep cross-check consistent | |
+| Trees from Meta/WRI CHMv2 (worldwide) | done, verified | quadkey test; `sites/example` (Manhattan) since 2026-10-11, udprep cross-check consistent | |
 | Trees from own CHM / LAS + DTM / own `trees.geojson` | done, not run on real data | LAS route: 1 offline test | |
 | Tree shapes (box, hexagon, circle), `voxel_method` udprep / exact | done, verified | tests; udprep cross-check | |
+| Crowns cut around buildings and fills; canopy masked by all OSM buildings | done, verified (2026-10-11) | 8 cut tests, 1 filter test, 2 mask tests; example: 0 m³ of tree solid in buildings, 0 cells, udprep check consistent; Earl's Court (`udprep` method): same | plan cut only (no stepped solids) |
 | `case_check.py` (after udprep) | done, verified | 4 synthetic tests; run on the 5 final real cases and the 2026-09-29 and pre-review cases | reads BCs and logs |
 | `facet_types.py` | backend only | 2 tests (incl. line n = triangle n); the file format and STL triangle order were checked once with real udprep (2026-10-04, 0 mismatches) using a types file from a scratch script that predates this module; the module's own output has not been run through udprep | §5.1 |
 | Facet size control for lEB | not started | | §5.2 |
@@ -282,10 +397,12 @@ only**; **counted only**; **not started**.
   `make_case.py` and `run_udprep.py`, with setup instructions, are in the
   repository under `tools/udprep_check/`; they reproduce case 301 exactly
   (`cases_repo/301`: same namoptions, `solid_c.txt` and missing-flux lines).
-- The STLs in `cases_final` are byte-identical to the current
-  `sites/example`, `sites/compare_gaps_filled` and `sites/compare_gaps_open`
-  `udales/geom.*.stl` (checked 2026-10-05). The `compare_heights_*` pair was
-  not run through udprep.
+- The STLs in `cases_final` are byte-identical to the 2026-10-05 builds:
+  612 to the South Kensington `sites/example` as it was until 2026-10-11
+  (since replaced by the West Village, Manhattan example, which has NOT been
+  run through udprep IBM or `case_check`), 613 and 614 to
+  `sites/compare_gaps_filled` and `sites/compare_gaps_open` (checked
+  2026-10-05). The `compare_heights_*` pair was not run through udprep.
 
 ### 4.2 Full sites, IBM only, dx = dy = dz = 2 m
 
@@ -369,34 +486,39 @@ described in AGENTS.md §5.5) builds random dense 60 × 60 m layouts (blocks
 with light-wells, slits to the street, small sheds, corners on cell centres)
 and runs stages 9–12 in memory. With the final code, two seeds × 150 layouts:
 hair cracks in 2 and 2 layouts (131 of 150 before the review fixes), at most
-0.1 m², none next to a plug; no narrow enclosed columns left after filling in
-any layout. The saved copy still uses the grid-fit signatures from before the
-review (no `dy` in the four grid-fit calls, no `snap` at the end of
-`cell_centre_heights` and `drop_unseen_groups`; AGENTS.md §5.5) and must be
-updated before reuse.
+0.27 m² (rerun 2026-10-11: 0.096 and 0.268 m²), none next to a plug; no
+narrow enclosed columns left after filling in any layout.
 
 ### 4.5 Offline tests
 
-`python -m pytest tests -q` on 2026-10-05: 64 passed in 1.4 s (59 test
-functions, 64 cases after parametrisation).
+`python -m pytest tests -q` on 2026-10-11: 127 passed in about 2 s (101 test
+functions, 127 cases after parametrisation).
 
 | File | Functions | Cases |
 |---|---|---|
-| `tests/test_case_check.py` | 4 | 4 |
+| `tests/test_case_check.py` | 5 | 5 |
+| `tests/test_config.py` | 8 | 16 |
 | `tests/test_edges.py` | 7 | 7 |
 | `tests/test_facet_types.py` | 2 | 2 |
-| `tests/test_gaps.py` | 11 | 12 |
-| `tests/test_grid_fit.py` | 15 | 15 |
+| `tests/test_gaps.py` | 13 | 14 |
+| `tests/test_grid_fit.py` | 17 | 17 |
+| `tests/test_osm.py` | 3 | 16 |
 | `tests/test_osm_heights.py` | 5 | 5 |
 | `tests/test_rasters.py` | 4 | 7 |
-| `tests/test_vegetation.py` | 11 | 12 |
-| **Total** | **59** | **64** |
+| `tests/test_vegetation.py` | 37 | 38 |
+| **Total** | **101** | **127** |
 
 ### 4.6 Current site numbers
 
 From `sites/<name>/buildings.report.json` and `site.report.json`, rebuilt
-2026-10-05 02:14–02:15. `build.py` and `city_surface.py` carry a later file
-time (02:28); the sites have not been rebuilt since.
+2026-10-05 02:14–02:15; all five rebuilt again on 2026-10-11 (12:00) with
+the final code: the geometry rows are unchanged (same face counts, same
+hair cracks), the tree rows below show the 2026-10-11 values. The `example`
+column is the South Kensington build of 2026-10-05: since 2026-10-11
+`example` is West Village, Manhattan (508 × 340 m, 340 buildings, 14340
+faces, OSM heights, Meta canopy map, box trees, `voxel_method "exact"`, 230
+trees, 27 554 cells, 137 crowns cut around buildings, 0 m³ of tree solid
+inside buildings).
 
 Geometry and grid fitting:
 
@@ -444,14 +566,15 @@ Mesh, checks, grid and trees:
 | ground missing | 0.0 % | 0.0 % | 0.0 % | 0.0 % | 0.0 % |
 | itot × jtot × ktot | 281 × 351 × 112 | 281 × 351 × 132 | 281 × 351 × 132 | 276 × 358 × 48 | 276 × 358 × 48 |
 | zsize [m] | 224 | 264 | 264 | 96 | 96 |
-| trees | 643 | 643 | 643 | 636 | 636 |
+| trees (2026-10-11) | 643 (S. Kensington, 2026-10-05) | 643 | 643 | 636 | 636 |
 | shape / voxel_method | hexagon / exact | box / udprep | box / udprep | box / udprep | box / udprep |
-| vegetation cells | 77689 | 139046 | 138878 | 72382 | 72392 |
+| vegetation cells (2026-10-11) | 77689 (2026-10-05) | 139194 | 139062 | 72115 | 72125 |
 | udprep cross-check | consistent | consistent | consistent | consistent | consistent |
 
-All five sites use the EA Vegetation Object Model and, for the LiDAR cases,
-the England WCS (coverage 100 %). The example config uses the owner's own
-choices `shape: "hexagon"` and `voxel_method: "exact"`.
+All five sites used the EA Vegetation Object Model and, for the LiDAR cases,
+the England WCS (coverage 100 %); the example then used the owner's choices
+`shape: "hexagon"` and `voxel_method: "exact"` (now `"box"` and `"exact"`,
+Manhattan, Meta canopy map).
 
 ## 5. Open issues and decisions waiting for the owner
 
@@ -533,9 +656,11 @@ flux left at Earl's Court (14.4 m²). Options: leave as is (current), fill
 uDALES needs nprocx to divide itot, and nprocy to divide both jtot and
 ktot. `snap_m = dx` gives arbitrary sizes:
 
-- example 281 × 351 × 112: 281 is prime, so nprocx is 1 (or 281, one
-  column per rank); gcd(351, 112) = 1, so nprocy is 1. In practice the
-  example runs on one rank unless `snap_m` or `zsize` is changed;
+- South Kensington (the example until 2026-10-11) 281 × 351 × 112: 281 is
+  prime, so nprocx is 1 (or 281, one column per rank); gcd(351, 112) = 1, so
+  nprocy is 1: one rank unless `snap_m` or `zsize` is changed;
+- the Manhattan example 254 × 170 × 90: nprocx 1, 2 (127 is prime) or 127,
+  254; nprocy 1, 2, 5 or 10 (gcd(170, 90) = 10);
 - heights pair 281 × 351 × 132: nprocx 1, nprocy 1 or 3 (at most 3 ranks);
 - Earl's Court 276 × 358 × 48: nprocx any divisor of 276
   (1, 2, 3, 4, 6, 12, 23, …), nprocy 1 or 2.
@@ -591,12 +716,13 @@ points must already be in the site CRS), and used whenever set, even with
 `dsm_file` + `dtm_file` route covers most use cases outside the automatic
 countries.
 
-### 5.10 Tree rebuild rounding
+### 5.10 Tree rebuild rounding (closed 2026-10-11)
 
-`trees.geojson` stores x, y, r to 1 mm and h to 1 cm. A rebuild that reuses
-it gives slightly different vegetation cells from the run that created it
-(Earl's Court, 2026-09-29: 72 368 versus 72 274 cells). Harmless, but a
-rerun is not bit-identical to the first run.
+`trees.geojson` stores x, y, r to 1 mm and h to 1 cm. A rebuild that reused
+it gave slightly different vegetation cells from the run that created it
+(Earl's Court, 2026-09-29: 72 368 versus 72 274 cells). Since 2026-10-11 the
+first run reads the file back after writing it, so every run builds from
+the same numbers.
 
 ### 5.11 Smaller known issues
 
@@ -612,8 +738,7 @@ the ones found in the 2026-10 work.
 - The tool's own census after filling prints a warning if narrow enclosed
   columns remain; it does not stop the build.
 - Hair cracks with less than 1 m² of crack walls pass the build as a warning
-  (stress test: about 1 % of random layouts, at most 0.1 m²; none on the five
-  sites).
+  (stress test: 2 of 150 random layouts per seed, at most 0.27 m²).
 - No offline test builds a whole site with the domain corner off the
   lattice; each layer of the hair-crack defence has its own test.
 
@@ -678,6 +803,28 @@ and gets filled by its cells, while `case_check` on that case would count it
 open. The error is on the safe side (a few extra fills) and untested on a
 real non-periodic site. Options: an option or a namoptions path to set the
 periodicity, or leave as is while all cases are periodic.
+
+### 5.16 Closed on 2026-10-11
+
+- Tree solids entered buildings (`trees.stl`, `trees.<expnr>.stl`): crowns
+  are now cut around the buildings and fills (§2, AGENTS.md stage 15d).
+- Canopy map masked by the modelled buildings only: now by every OSM
+  building in the domain; trees centred on an unmodelled one are dropped.
+- `read_trees_geojson` crashed on a QGIS-written `"base": null`.
+- `namoptions.trees.<expnr>` claimed udprep regenerates the same cells for
+  every `voxel_method`: the note is now method-dependent.
+- `_cells_exact` used the convex hull of the solid (wrong for non-convex
+  prisms; latent before the cut).
+- `overview.png` drew circles for box trees: now the cut outlines.
+- From the review of the change (18 findings, all fixed the same day): a
+  building side ~1e-10 m off a box side (non-dyadic dx) made `shrink_plan`
+  loop and fail — jogs are simplified away first; a run with trees but no
+  cells crashed the summary print; vegetation off left `trees.stl`,
+  `trees_plan.geojson` and `vegetation.report.json`; renumbered duplicate
+  ids were not in `trees_plan.geojson`; hand-edited trees with `h ≤ base`
+  crashed (hexagon/circle) — skipped; the `namoptions.trees` note read badly
+  and ignored `drop_cells_in_buildings false`; stale "South Kensington"
+  references to the example in README, AGENTS.md and here.
 
 ### 5.15 Closed on 2026-10-05 (were open on the previous status)
 

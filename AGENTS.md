@@ -43,7 +43,8 @@ config into uDALES inputs. It downloads OSM building footprints, gives each a
 height (LiDAR where it can be downloaded, else the OSM tag, else a default),
 fits the buildings to the uDALES grid (fills gaps and courtyards too narrow for
 the grid, drops buildings the grid cannot see), meshes them into one
-watertight 2.5D surface, checks it with uDALES' own `udgeom` plus its own
+connected 2.5D surface (roofs, walls and ground, open only along the domain
+edge), checks it with uDALES' own `udgeom` plus its own
 gates, and writes `geom.<expnr>.stl`. Optionally it finds individual trees in
 a canopy height map and writes uDALES vegetation files.
 
@@ -75,29 +76,32 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `case_check.py` | standalone, after udprep: #367 check on `solid_c.txt` (periodic per `BCxm`/`BCym`), unused facets, missing-flux lines from the case's logs; also holds `periodic_labels` and `level_components`, which `grid_fit.py` imports |
 | `facet_types.py` | standalone backend, not wired in: ground/roof/wall per STL triangle and the types file udprep reads |
 
-### Tests `tests/` (offline: no network, no uDALES clone; 64 tests)
+### Tests `tests/` (offline: no network, no uDALES clone; 127 cases)
 
 | file | covers |
 |---|---|
 | `test_edges.py` | extend policy (growth, clearance, min_inside, limits, bad mode); LiDAR roof percentile vs eaves |
-| `test_osm_heights.py` | relation courtyards to the smallest containing outer; LiDAR-flat rule |
+| `test_osm_heights.py` | relation courtyards to the smallest containing outer (nested buildings); LiDAR-flat rule |
+| `test_osm.py` | height-tag parsing (finite, positive metres only), `building=no` left out, a courtyard ring that is a building kept, an incomplete Overpass answer refused |
+| `test_config.py` | null = default, `expnr` 0–999, error line numbers after block comments, corner order, antimeridian, the vegetation switch, grid spacing when xlen is not a multiple of dx |
 | `test_rasters.py` | DTM hole filling; request boxes on each source's pixel grid; request URLs per service kind |
 | `test_gaps.py` | gap filling widths, heights, notches, domain edge, snap grid; mesher micro-face regression; per-piece opening; per-level sliver claim and noding that never swaps corners (both meshed and checked with `_hair_cracks`) |
 | `test_grid_fit.py` | courtyard detection and filling (outline and cell routes, heights, sheds, towers, roof-height solid rule, wide courtyard behind an unresolved slit), unseen buildings, plugs only where enclosed and without cracks, separate dy, `on_lattice` rounding like GEOS |
-| `test_case_check.py` | cavity detection on synthetic IBM masks: x and y seams, wrap-padded block test, non-periodic boundaries |
+| `test_case_check.py` | cavity detection on synthetic IBM masks: x and y seams, wrap-padded block test, non-periodic boundaries; a `solid_c.txt` from another grid is exit code 2 |
 | `test_facet_types.py` | classes per triangle, the types file format and its line order (line n = triangle n) |
-| `test_vegetation.py` | quadkeys, LAS CHM, segmentation, tree shapes, voxelization methods, building drop, file formats, `trees.geojson` I/O |
+| `test_vegetation.py` | quadkeys, LAS CHM, segmentation, tree shapes, voxelization methods, crowns cut around buildings (cut, low roof, split crown, non-convex cells, nothing left, shared corner stays watertight after an STL round trip), building drops, file formats, `trees.geojson` and `trees_plan.geojson` I/O |
 
 ### Configs `configs/`
 
 | file | purpose |
 |---|---|
-| `example.jsonc` | South Kensington; documents every parameter. It uses the owner's own choices `edge_buildings "extend"`, `snap_m 2.0`, `shape "hexagon"` and `voxel_method "exact"` (keep them); the code defaults are `"clip"`, 1.0, `"box"` and `"udprep"` |
+| `example.jsonc` | West Village, Manhattan since 2026-10-11 (OSM heights, Meta canopy map; South Kensington before); documents every parameter. It uses the owner's own choices `edge_buildings "extend"`, `snap_m 2.0`, `shape "box"` and `voxel_method "exact"` (keep them); the code defaults are `"clip"`, 1.0, `"box"` and `"udprep"` |
 | `compare_heights_osm.jsonc` / `compare_heights_lidar.jsonc` | South Kensington twins, expnr 101/102: only `height_source` differs (`"osm"` / `"lidar"`); `zsize` 264 in both |
 | `compare_gaps_open.jsonc` / `compare_gaps_filled.jsonc` | Earl's Court terraces twins, expnr 202/201: only `fill_gaps` differs (false / true); `zsize` 96 in both |
 
 All five set `snap_m = dx = 2`, `edge_buildings "extend"`, vegetation on, and
 `udales_tools` to `F:/stl/u-dales/tools/python` (change it on another machine).
+The four `compare_*` sites are in London (LiDAR heights, EA canopy map).
 
 ### Docs `docs/`
 
@@ -167,7 +171,7 @@ the folder's existence is checked, not that `udgeom` imports.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-64 tests (about 2 s), no network and no uDALES clone. The network sources
+127 test cases (about 2 s), no network and no uDALES clone. The network sources
 (Overpass, LiDAR services, EA VOM, Meta CHM), `udgeom` and the udprep
 cross-check are exercised only by building real sites (§5.2).
 
@@ -281,7 +285,7 @@ Stages 1–6 and 14–16 run in `build.py: build_site`; stages 7–13 in
 | `corners` | required, `[[lon, lat], [lon, lat]]` | 2 |
 | `crs` | `"auto"` (UTM zone of the midpoint) | 2 |
 | `snap_m` | 1.0 | 2, 4 |
-| `dx` | 2.0 (dy = dx) | 4, 10, 11, 14 |
+| `dx` | 2.0 (the grid's dx = xlen/itot, dy = ylen/jtot: equal to it when snap_m is a multiple of it) | 4, 10, 11, 14 |
 | `dz` | dx | 11, 14 |
 | `zsize` | max(96 m, 3 × tallest building), rounded up to a multiple of dz | 14 |
 | `expnr` | `"001"` (numeric values padded to 3 digits) | 14 |
@@ -296,16 +300,23 @@ Stages 1–6 and 14–16 run in `build.py: build_site`; stages 7–13 in
 
 `region.py: make_region, auto_utm`
 
-1. Corners are WGS84 `[lon, lat]`, any diagonal pair, in any order. A value
-   outside −180..180 / −90..90 is a `ConfigError` ("pasted latitude first?").
-   A warning is printed when both corners have |lat| > |lon|, max |lat| > 60
-   and max |lon| < 60. The centre is printed as "lat …, lon …" so the user can
-   check it on a map (the OSM URL shows latitude first).
+1. Corners are WGS84 `[lon, lat]`, two opposite corners in either order. A
+   value outside −180..180 / −90..90 is a `ConfigError` ("pasted latitude
+   first?"); so are corners on both sides of the 180th meridian, whatever
+   the `crs` (not supported: the midpoint would pick the wrong UTM zone, and
+   the OSM and canopy downloads ask for a lon/lat box). A NOTE is printed
+   when a corner is above 60° latitude and both |lon| < 60 (a swapped pair
+   often looks like that; so do correct sites up north). The centre is
+   printed as "lat …, lon …" so the user can check it on a map (the OSM URL
+   shows latitude first).
 2. `crs` `"auto"` = WGS84 UTM zone of the midpoint (EPSG:326zz north, 327zz
    south); otherwise the code given.
 3. Both corners are projected; their axis-aligned box in metres is the corner
    box (`raw_bbox`, `raw_size` in `site.report.json`). A side under 50 m is a
-   `ConfigError`.
+   `ConfigError`. Grid convergence turns the map against the projected axes,
+   so the OTHER diagonal of the same lon/lat rectangle gives a box a few
+   metres different (about 11 m on 300 m in London): reuse the same two
+   corners to repeat a domain.
 4. Width and height are rounded up to multiples of `snap_m` [1.0], centred on
    the corner box: the domain never cuts into the framed area, and xlen, ylen
    divide by dx when `snap_m` is a multiple of dx.
@@ -328,20 +339,34 @@ on save.
 1. Query box: the four corners of the projected domain, each pushed out 25 m,
    converted to lon/lat; their min and max (grid convergence makes a two-corner
    box under-cover).
-2. Overpass query (`[timeout:120]`): `way["building"]` and
-   `relation["building"]["type"="multipolygon"]`, with all their nodes
-   (`out body; >; out skel qt;`), so a building crossing the box arrives whole.
+2. Overpass query (`[timeout:120]`): `way["building"]["building"!="no"]`
+   and `relation["building"]["building"!="no"]["type"="multipolygon"]`, with
+   all their nodes (`out body; >; out skel qt;`), so a building crossing the
+   box arrives whole. `building=no` marks "not a building" (car parks,
+   pitches) and is skipped again in `to_geojson` (before 2026-10-11 it became
+   a 10 m default block). `out skel` prints a relation's member ways a
+   second time, without tags; `to_geojson` keeps the tagged copy. A site
+   downloaded before 2026-10-11 keeps its cached `buildings_osm.geojson`
+   (with any `building=no` areas) until `--force-fetch`.
 3. Four Overpass servers are tried in order (180 s timeout each), then all
-   again after 15 s; then a `RuntimeError`.
+   again after 15 s; then a `RuntimeError` whose message gives the
+   `buildings_osm.fetch.json` record needed to supply buildings by hand. An
+   answer with a "runtime error" `remark` (Overpass timeout or out of memory:
+   HTTP 200 with a truncated element list) counts as a failed server.
 4. Relations: member ways with role `inner` are courtyards, all others outer.
    Member ways are joined end to end into closed rings (≥ 4 nodes); pieces that
    do not close are dropped and counted. Each courtyard goes to the smallest
    outer ring that covers it; a courtyard inside no outer ring is dropped and
-   counted. One feature per outer ring, id `rel/N`.
-5. Ways: every way with a `building` tag that is not a member of a fetched
-   relation and has ≥ 4 nodes; closed if open; id `way/N`.
-6. Property `height`: the `height` tag with any `m` removed, if numeric; else
-   `building:levels` × 3 m; else none (0 counts as none).
+   counted. One feature per outer ring, id `rel/N` (a relation with several
+   outer rings gives several features with the same id; only the edge-policy
+   and unseen-building messages use ids).
+5. Ways: every way with a `building` tag (not `no`) that is not an OUTER
+   member of a fetched relation and has ≥ 4 nodes; closed if open; id
+   `way/N`. A courtyard ring tagged as a building itself (a lower building in
+   the courtyard) is therefore kept.
+6. Property `height`: the `height` tag in metres (`12`, `12 m`; other units
+   such as `mm` or feet are not parsed), else `building:levels` × 3 m, else
+   none; only finite values above 0 count.
 7. Written in the projected CRS with a legacy `crs` member so QGIS opens it in
    that projection. The record file is written next to it.
 
@@ -412,7 +437,7 @@ is not set; any other `height_source` is a `ConfigError`. Raster: 1 m,
 north-up, over the final domain (`canopy.SiteRaster`). Source, first that
 applies:
 
-1. `dsm_file` + `dtm_file` (both required, else `ValueError`; any CRS; same
+1. `dsm_file` + `dtm_file` (both required, else `ConfigError`; any CRS; same
    vertical datum): warped onto the raster (error if a file misses the
    domain); DTM holes filled; nDSM = DSM − DTM.
 2. Automatic download, `lidar_source` [`"auto"`]. `"auto"` tries each source
@@ -441,8 +466,11 @@ that times out or gets HTTP 502/503/504 is split in four (`TooSlow`, depth
 filled by inverse distance from the surrounding ground (`fill_holes`, up to
 150 pixels).
 
-No source → `"lidar"` stops with a `ConfigError`; `"auto"` prints a message
-and uses OSM heights. Otherwise `ndsm.tif` (for inspection only) and
+No source → `"lidar"` stops with a `ConfigError`; `"auto"` uses OSM heights
+and records why in `building_heights` (`lidar_tried`: the sources covering
+the site; `lidar_failures`: what went wrong). A failed download prints a
+WARNING ("LiDAR download failed -> OSM heights"), so it cannot be mistaken
+for a site without LiDAR. Otherwise `ndsm.tif` (for inspection only) and
 `heights.provenance.json` (source, licence, coverage, time; the same goes into
 `site.report.json`) are written. They are not deleted when a later run uses no
 LiDAR; `building_heights.source` in `site.report.json` is the source actually
@@ -732,9 +760,12 @@ fluid in real udprep, a one-cell enclosed column.
 `gap_fill`, `courtyard_fill` or `plug` flag.
 
 Measured (dx = dz = 2 m, final builds of 2026-10-05): South Kensington
-(example) 43 narrow enclosed columns before → 0 after (9 courtyard fills,
-174.1 m²; 91 narrow components, summed over levels, filled by outline and 17
-by cells; 1 second-pass gap fill, 0.2 m²; 2 outlines noded; no plug); Earl's
+(`compare_heights_lidar`; the example until 2026-10-11) 43 narrow enclosed
+columns before → 0 after (9 courtyard fills, 174.1 m²; 91 narrow components,
+summed over levels, filled by outline and 17 by cells; 1 second-pass gap
+fill, 0.2 m²; 2 outlines noded; no plug); the Manhattan example (2026-10-11)
+258 → 0 (50 fills, 961.9 m²; 286 by outline, 104 by cells; 34 second-pass
+fills, 55.4 m²; 8 noded; 1 plug); Earl's
 Court with gaps filled 228 → 0 (65 courtyard fills, 846.5 m²; 253 by outline,
 147 by cells; 53 second-pass gap fills, 61.7 m²; 1 unseen building dropped;
 11 outlines noded; 1 plug). `open_narrow_cells` after (cell-levels): 2572
@@ -777,9 +808,10 @@ it partway up, the tall wall's vertical edge is not split. udgeom reports
 these T-junctions as "unstitched touching regions"; stage 13 welds them.
 `surface_stats` in `buildings.report.json`: partition, roof, ground faces,
 wall segments, face count, and `wall_outwardness` (share of wall triangles
-facing away from the nearest footprint centroid; a weak indicator, 0.70–0.73
-on the five current (correct) meshes). `edge_max_len` is ignored with this
-method.
+facing away from the nearest footprint centroid: a rough heuristic, 0.63–0.73
+on correct meshes because the nearest centroid is often a neighbour's; it
+cannot detect inverted walls — the orientation is right by construction,
+step 4). `edge_max_len` is ignored with this method.
 
 ### Stage 13. Checks
 
@@ -820,16 +852,18 @@ The chain as it runs:
    writes facet areas with `%.6f`, so a face under 5e-7 m² becomes 0 and the
    energy balance divides by it (SIGFPE); udgeom only flags ≤ 1e-12 m².
 7. **Hair-crack gate** (`_hair_cracks(mesh, HAIR_CRACK_M)`, `HAIR_CRACK_M` =
-   0.01 m): the STL's own height field is read from its upward faces (normal
-   z > 0.999; roofs and ground tile the plan). For every wall triangle
-   (|normal z| < 1e-6), the point 1 cm in front of its centroid must be air:
-   if the surface there is higher than the centroid, the wall faces solid
-   again across a crack narrower than 1 cm, lies in solid cells and gets no
-   flux in uDALES. With `fill_gaps` on, a total crack wall area of
+   0.01 m): the STL's own height field is read from its upward faces
+   (normal z > 0.999; roofs and ground tile the plan). For every wall
+   triangle (|normal z| < 1e-6), the point 1 cm in front of its centroid
+   must be air: if the surface there is higher than the centroid, the wall
+   faces solid again across a crack narrower than 1 cm, lies in solid cells
+   and gets no flux in uDALES. Slits of 1–3 cm pass unseen (§7.1); a 5 cm
+   probe was tried on 2026-10-11 and not adopted (it flagged 10–12 of 150
+   stress layouts, 3 of 300 above 1 m²). With `fill_gaps` on, a total crack wall area of
    `HAIR_CRACK_MAX_M2` = 1.0 m² or more makes the mesh invalid (that size
    means a systematic tool bug: the 2026-10 lattice offset gave 35–160 m²);
-   less is a WARNING (the mesher's own snapping leaves cm-wide crevices of up
-   to about 0.1 m² in about 1 % of awkward synthetic layouts, §5.5). With
+   less is a WARNING (the mesher's own snapping leaves cm-wide crevices, at
+   most 0.27 m² in 2 of 150 random layouts per seed, §5.5). With
    `fill_gaps` off any crack is a WARNING (it can be a real OSM slit). The
    message gives the count, the area and up to five positions. Report keys:
    `hair_crack_walls` (wall triangles) and `hair_crack_area_m2`.
@@ -841,13 +875,16 @@ The chain as it runs:
    only.
 10. **Decision**: `buildings.report.json` is always written. Invalid with
     `allow_invalid` [false] → `RuntimeError`; `buildings.stl` and its reports
-    are on disk, but `udales/`, `overview.png` and `site.report.json` keep
-    what an earlier run wrote. With `allow_invalid: true` the run continues
-    with a warning and copies the invalid STL to `udales/`.
+    are on disk, `site.report.json` is gone (deleted before this stage, so
+    an earlier run's report cannot pass for this one), and `udales/` and
+    `overview.png` keep what an earlier run wrote. With `allow_invalid: true`
+    the run continues with a warning and copies the invalid STL to
+    `udales/`.
 
-On all five sites (final builds of 2026-10-05) `repairs` = `fix,
+On the four London sites (final builds of 2026-10-05) `repairs` = `fix,
 weld_touching_boundaries, weld_touching_boundaries`, the file passed at the
-first reload with 1–2 accepted corner contacts and no pathological edges,
+first reload with 1–2 accepted corner contacts and no pathological edges
+(the Manhattan example of 2026-10-11: `fix` and one weld, no corner contacts),
 smallest faces 5.0e-5 m² (Earl's Court, the lattice minimum) to 1.8e-3 m²,
 ground missing 0.0 %, `hair_crack_walls` 0 (4 walls, 48.4 m², as a warning
 with `fill_gaps` false at Earl's Court: the original OSM slits).
@@ -856,8 +893,10 @@ with `fill_gaps` false at Earl's Court: the original OSM slits).
 
 `build.py: _suggest_grid, build_site`
 
-- itot = round(xlen / dx), jtot = round(ylen / dx), dy = dx; a warning if
-  xlen or ylen is not a multiple of dx (set `snap_m` to a multiple of dx).
+- itot = round(xlen / dx), jtot = round(ylen / dx); the grid's spacings are
+  xlen / itot and ylen / jtot (what every later stage uses, and what
+  `site.report.json` `grid.dx` / `grid.dy` record); a warning if xlen or ylen
+  is not a multiple of dx (set `snap_m` to a multiple of dx).
 - dz = `dz` [dx]. zsize = `zsize` [max(96 m, 3 × the tallest height from stage
   8, before rounding)], rounded up to a multiple of dz; ktot = zsize / dz.
 - Stages 10–13 use a provisional grid (tallest building taken as 100 m); only
@@ -878,9 +917,12 @@ assumes uniform dz.
 `build.py: build_site`, `vegetation.py: is_enabled, resolve_config, build_vegetation`, `canopy.py: get_chm`, `trees.py`, `voxelize.py`. Background: [docs/vegetation_design.md](docs/vegetation_design.md).
 
 **On/off.** No `vegetation` section, `false`, `{"enabled": false}` or
-`"source": "none"` → off, and `veg.inp.<expnr>`, `veg_params.inp.<expnr>`,
-`namoptions.trees.<expnr>` and `trees.<expnr>.stl` are deleted from
-`udales/`. On: missing keys from `vegetation.DEFAULTS`; an unknown `source`,
+`"source": "none"` → off, and an earlier run's `veg.inp.<expnr>`,
+`veg_params.inp.<expnr>`, `namoptions.trees.<expnr>` and `trees.<expnr>.stl`
+are deleted from `udales/`, and `trees.stl`, `trees_plan.geojson` and
+`vegetation.report.json` from the site folder (`_remove_veg_files`; the same
+cleanup runs when a vegetation run ends without trees or cells).
+`trees.geojson` always stays. On: missing keys from `vegetation.DEFAULTS`; an unknown `source`,
 `shape`, `hex_radius` or `voxel_method`, `"file"` without `trees_file`, or
 `las_files` without `dtm_file` is a `ConfigError`.
 
@@ -901,9 +943,16 @@ reused, changes to the canopy source, segmentation keys and `trunk_offset`
 have no effect; `shape`, `voxel_method` and `params` always apply.
 
 **15b. Canopy height map.** Resolution `chm_res` [1.0 m]. `chm.tif` is reused
-only with the same domain (same 0.011 m tolerance) and resolution and no
-rebuild asked for (in practice
-only when `trees.geojson` was deleted by hand). For `source` `"lidar"` or
+only with the same domain (same 0.011 m tolerance), resolution and canopy
+request (`source`, `chm_file`, `las_files`, `dtm_file`, `las_crs`,
+`veg_classes`, `ea_year`, recorded as `request` in `canopy.provenance.json`)
+and no rebuild asked for (in practice only when `trees.geojson` was deleted
+by hand). Every raster read drops implausible values before resampling
+(undeclared no-data such as −9999 or a uint8 255): outside −500..9000 m for
+DSM/DTM, outside −150..150 m for canopy maps; canopy heights left beyond
+±150 m after the LAS subtraction become no-data too (and count against
+`coverage_of_site`). A Meta tile that fails to download stops the run
+("rerun later"); only a missing tile (HTTP 404, open sea) is skipped. For `source` `"lidar"` or
 `"auto"` [`"auto"`], the first that applies:
 
 1. `chm_file`: your canopy height GeoTIFF, any CRS.
@@ -921,7 +970,11 @@ the domain had data. Written: `chm.tif`, `canopy.provenance.json` (source,
 tiles, licence, coverage, domain, resolution, time).
 
 **15c. Crowns.** The CHM is zeroed under footprints and fills (from
-`buildings.footprints.json`, so courtyard fills and plugs too) grown by
+`buildings.footprints.json`, so courtyard fills and plugs too) and under
+every OSM building inside the domain (`buildings_osm.geojson`: the edge
+policy and `min_area` keep some out of the geometry, but a model-derived
+CHM paints canopy on their roofs just the same — before this, 33 of the
+Manhattan example's 255 trees stood on such buildings), all grown by
 `mask_buildings_buffer_m` [1.0 m]. Canopy = CHM > `min_canopy_height` [3.0 m];
 Gaussian smoothing σ = `smooth_sigma_m` [1.0 m]; tops = local maxima ≥
 `min_peak_distance_m` [3.0 m] apart within each connected patch (a patch
@@ -929,22 +982,72 @@ without one gets its highest point); watershed gives the crowns. Dropped:
 area < `min_crown_area` [5 m²]; area > `max_crown_area` [2000 m²] (woods;
 area reported); top ≤ `trunk_offset` + 0.5 m. r = √(area / π), `base` =
 `trunk_offset` [2.0 m]. For every source, trees with their centre inside a
-footprint or fill are dropped; `cap_radius_to_buildings` [false] would shrink
-r to 0.95 × the distance to the nearest one. `trees.geojson` is (re)written on
-every run except with `"file"`: points in the site CRS with `id` (`tree/0001`…),
-`r`, `h`, `base`, `source`, optional `shape`; x, y and r rounded to 1 mm, h and
-base to 1 cm. Dropped trees disappear from the file. No trees left → warning,
-buildings only (see the end of 15e).
+footprint or fill are dropped (`dropped_centre_in_building`), and so are
+trees centred on an OSM building the geometry left out
+(`dropped_centre_in_unmodelled_building`); `cap_radius_to_buildings`
+[false] would also shrink r to 0.95 × the distance to the nearest modelled
+one (superseded by the cut in 15d). `trees.geojson` is written only when
+the trees were freshly segmented (never with `"file"`, never when reused, so
+hand edits and extra properties survive; a reused tree centred in a building
+stays in the file and is skipped each run): points in the site CRS with `id`
+(`tree/0001`…), `r`, `h`, `base`, `source`, optional `shape`; x, y and r
+rounded to 1 mm, h and base to 1 cm. The run then reads the file back, so the
+first run and every rerun build from the same numbers. Features with `r` or
+`h` not above 0 are skipped when read. With `"file"`, a `trees_file` with no
+tree inside the domain is a `ConfigError` (wrong CRS: it must be in the
+site's metres). No trees left → warning, buildings only (see the end of 15e).
 
-**15d. Tree solids.** One closed solid per tree from z = `base` to `h`, sim
-frame, all in `trees.stl`. `shape` [`"box"`] (a tree's own `shape` wins):
-`box` has the crown circle's plan area (side √π · r), faces snapped to cell
-faces (≥ 1 cell each way), then pulled in by 1e-3 × (1 + k mod 50) of a cell
-(≤ 5 %) so neighbouring boxes never share a face (udprep would reject the
-merged mesh); `hexagon` (`hex_radius` `"circumscribed"` corners on r, 83 % of
-the crown area, or `"inscribed"`, 110 %); `circle` (24-gon with the crown
-area). Tree numbers from the ids (`tree/0007` → 7); duplicates renumbered
-above the largest.
+**15d. Tree solids** (`trees.tree_plan`, `clip_plan`, `shrink_plan`,
+`plan_solid`, `tree_solid`). Per tree, in the sim frame:
+
+1. Plan polygon. `shape` [`"box"`] (a tree's own `shape` wins): `box` has
+   the crown circle's plan area (side √π · r), sides snapped to cell faces
+   (≥ 1 cell each way; its z range to multiples of dz too — cell faces on
+   the uniform grid the CLI always makes; an exact tie, e.g. a 9 m top on a
+   2 m grid, goes up); `hexagon`
+   (`hex_radius` `"circumscribed"` corners on r, 83 % of the crown area, or
+   `"inscribed"`, 110 %); `circle` (24-gon with the crown area).
+   The plan is then clipped to the domain: canopy beyond the edge gets no
+   cells and is not wrapped across a periodic seam.
+2. Cut around the buildings: the sidecar records (buildings, gap and
+   courtyard fills, plugs) whose roof is above the crown base are
+   subtracted from the plan. A piece the cut leaves is dropped only if it is
+   smaller than one grid cell AND holds no cell centre (a sliver that would
+   get no cell; a one-cell crown nicked by a wall keeps its cell); solids
+   that only touch the plan change nothing. Nothing left → the tree is
+   dropped (`building_cut.trees_removed`; a crown wholly outside the domain
+   counts as `trees_outside_domain`). A crown split by a thin building becomes
+   a MultiPolygon (one body per part). Canopy above a roof lower than the
+   crown base is kept; canopy above a roof between base and top is lost
+   with the cut (no stepped solids; 1 % of the volume on the Manhattan
+   example). Why a cut and not a smaller crown: the crown circle is drawn
+   around the centroid of a canopy patch that the mask (15c) cut off at the
+   wall, so the circle reaches back into the building (139 of 255 crowns on
+   that example, 4 % of the tree volume), and the box snapping adds up to
+   half a cell per side; Xinzhe's isotropic cap (0.95 × distance to the
+   nearest building, our `cap_radius_to_buildings`) would have removed 29 %
+   of the crown area and still leaves snapped boxes inside walls.
+3. Shrink by 1 mm, by more (1 mm steps) if the outline would share a
+   corner with an earlier tree's: two crowns cut by the same building corner
+   share it and, with the same base and top (always for box trees), the
+   vertical edge through it; udprep loads the STL with vertices merged, that
+   edge is used by four faces, the mesh is not watertight and udprep rejects
+   the file (seen). Corners are compared as float32, which is what
+   the binary STL stores. The shrunk outline is first simplified by
+   0.25 mm: a building side lying ~1e-10 m off a box side (a non-dyadic dx
+   leaves such offsets in the sim frame) would otherwise leave a jog that
+   float32 cannot hold and no shrink can resolve. A tree with `h` ≤ `base`
+   (hand-edited) is skipped (`building_cut.trees_without_crown`).
+4. Extrude from z = `base` to `h` (`trimesh.creation.extrude_polygon`, one
+   watertight body per part), all trees into `trees.stl`.
+
+Tree numbers from the ids (`tree/0007` → 7); duplicates renumbered above the
+largest. `trees_plan.geojson` (world frame, legacy `crs` member) holds the
+cut outlines with `id` = `tree/<veg_params id>` (after the renumbering, so
+a cell traces back to its outline), `h`, `base`, `cut_m2`;
+`vegetation.report.json` `building_cut` has `trees_cut` (cut by more than
+1e-6 m²), `trees_removed`, `trees_without_crown`, `trees_outside_domain`,
+`area_cut_m2`, `area_m2`.
 
 **15e. Cells and files.**
 
@@ -954,43 +1057,57 @@ above the largest.
    pitch min(dx, dy, dz), fill, keep cells whose centres are filled (widens
    each crown by about one cell per side; see
    `cell_volume_over_solid_volume`); cells labelled by per-tree voxelization,
-   leftovers to the nearest tree. `"exact"`: cells whose centre is strictly
-   inside the solid (first tree keeps shared cells).
+   leftovers to the nearest tree axis in plan (height not considered; the
+   ids are for tracing only, the solver does not use them). `"exact"`:
+   cells whose centre is strictly
+   inside the tree's cut plan and between its base and top (first tree
+   keeps shared cells).
 3. `drop_cells_in_buildings` [true]: cells at or below the building top of
-   their column (footprints and all fills) are removed.
+   their column (footprints and all fills; a centre exactly on an outline
+   counts as inside, as in udprep's IBM; `_building_top_map`) are removed.
+   The solids are
+   already cut around the buildings, so this catches only the udprep
+   widening next to walls; with `"exact"` it drops nothing
+   (`cells_dropped_in_buildings` 0).
 4. Written to `udales/` with LF line ends: `veg.inp.<expnr>` (header, then
    1-based `i j k`, sorted), `veg_params.inp.<expnr>` (same row order:
    `id lad cd ud dec lsize r_s` from `params` [1.0, 0.2, 0.005, 0.40, 0.15,
    200.0], London plane), `namoptions.trees.<expnr>` (`&TREES` block with
    `itree_mode = 1`, `ntrees` = cell count, parameters, `ltreedump`; its
-   notes say to set `treesfile`, that the veg files may be copied back over
+   notes say to set `treesfile`, what udprep makes from that STL (the same
+   cells plus a few inside walls for `"udprep"`; about one cell more per
+   side for `"exact"`), that the veg files may be copied back over
    udprep's output for `itree_mode = 1` but not for `itree_mode = 2` (§4.6),
    and that the tree energy balance needs `lmoist` and `ltempeq`), and
    `trees.<expnr>.stl`.
-5. `udprep_check` [true]: udprep's own vegetation step runs on a scratch case
+5. `udprep_check` [true], run BEFORE item 4 writes anything to `udales/`:
+   udprep's own vegetation step runs on a scratch case
    `_udprep_check/<expnr>/` and its cells are compared. `"udprep"`: consistent
    if we have no cell udprep lacks and udprep has exactly the in-building drops
    more. `"exact"`: consistent if at most max(10, 1 %) of our cells are
-   missing from udprep's. Mismatch → `RuntimeError` (veg files already in
-   `udales/`). The scratch case is deleted.
+   missing from udprep's. Mismatch → `RuntimeError`; the four veg files in
+   `udales/` (also an earlier run's) are deleted, `trees.stl` stays in the
+   site folder for inspection. The scratch case is deleted.
 6. Note printed if the median crown is under 5 cells across.
    `vegetation.report.json` is written; the same content goes into
    `site.report.json`.
 
 No trees, or no cell selected → warning, buildings only; the veg files of an
 earlier run (`veg.inp`, `veg_params.inp`, `namoptions.trees`,
-`trees.<expnr>.stl` in `udales/`) and `vegetation.report.json` are deleted
-(`_remove_veg_files`). The vegetation block still goes into
-`site.report.json`.
+`trees.<expnr>.stl` in `udales/`), `trees.stl`, `trees_plan.geojson` and
+`vegetation.report.json` are deleted (`_remove_veg_files`). The vegetation
+block still goes into `site.report.json`, with `n_trees` 0 (= trees in the
+uDALES files) and, after the no-cells case, `trees_without_cells`.
 
 ### Stage 16. Overview and reports
 
 `build.py: _overview_png, build_site`
 
 `overview.png`: footprints and fills (from `buildings.footprints.json`)
-coloured by height, crowns as circles (from `trees.geojson`, or from
-`trees_file` with `source` `"file"`; none when the run has no trees), the
-framed box dashed if stage 4 grew the domain. `site.report.json`: `name`,
+coloured by height, the cut crown outlines (from `trees_plan.geojson`; none
+when the run has no trees), the
+framed box dashed if stage 4 grew the domain (any side grew).
+`site.report.json` (deleted before the buildings stage runs, written last): `name`,
 `region`, `edge_buildings`, `building_heights`, `fetch`, `buildings` (subset:
 output_stl, valid, issues, n_faces, n_buildings, ground_missing_pct,
 min_face_area_m2, heights — the hair-crack keys are only in
@@ -1061,6 +1178,7 @@ All in `sites/<name>/` unless noted.
 | `trees.geojson` | 15c | the tool on the next run; you (edit in QGIS) |
 | `trees.previous.geojson` | 15a | you |
 | `trees.stl` | 15d | the tool (15e, same run) |
+| `trees_plan.geojson` | 15d | you (QGIS: the cut crown outlines); stage 16 |
 | `_udprep_check/` | 15e | temporary, deleted after the check |
 | `vegetation.report.json` | 15e | you (deleted when a vegetation run ends without trees or cells) |
 | `overview.png`, `site.report.json` | 16 | you |
@@ -1171,8 +1289,8 @@ Rules that follow:
 
 Fills carry `gap_fill`, `courtyard_fill` or `plug` in their props, and the
 flags are written per record into `buildings.footprints.json`. `n_buildings`
-excludes them; λp, ground coverage, the tree mask, the in-building cell drop
-and `overview.png` include them. Gap fills of the first pass are also in
+excludes them; λp, ground coverage, the tree mask, the tree cut, the
+in-building cell drop and `overview.png` include them. Gap fills of the first pass are also in
 `gap_fills.geojson`, courtyard and second-pass fills in
 `courtyard_fills.geojson` (both world frame with the legacy `crs` member,
 properties `height` and `kind` `"gap"`/`"courtyard"`, as made — the sidecar
@@ -1184,8 +1302,12 @@ has the final geometry).
   (j + ½) dy, (k + ½) dz in the sim frame, dx = xlen / itot,
   dy = ylen / jtot; 0-based in Python, 1-based in uDALES files.
 - **Solid rule**: a centre is solid when the column height H ≥ z −
-  `grid_fit.IBM_TOL` (5e-4 m, udprep's `ibmtol`). A centre at roof height
-  or on an outline is solid. Every test in `grid_fit.py` uses this; a new one
+  `grid_fit.IBM_TOL` (5e-4 m, udprep's `ibmtol`, which applies to its
+  vertical ray test only). A centre at roof height or exactly on an outline
+  is solid; there is no sideways tolerance band (udprep counts a centre on a
+  wall as solid only on exact coincidence, which the 1 cm lattice makes
+  possible). `voxelize._building_top_map` uses the same rule for the
+  in-building tree-cell drop. Every test in `grid_fit.py` uses this; a new one
   must too, or the tool's census and udprep's mask disagree.
 - **Periodic labelling**: `case_check.level_components` is the one
   definition of "narrow enclosed" (labels joined across periodic edges; main
@@ -1205,7 +1327,11 @@ by the solver (`ntrees` in `&TREES` is informational; the solver counts
 written from the same sorted `(i, j, k)` list. With `itree_mode = 2` udprep
 also writes `sveg.inp`, which must stay row-aligned with its own `veg.inp`, so
 the tool's veg files must not be copied over udprep's in that mode (the note
-in `namoptions.trees.<expnr>` says so).
+in `namoptions.trees.<expnr>` says so). With `ltrees` on, `write_inputs.sh`
+always runs udprep's tree step: it needs a trees source (`treesfile =
+'trees.<expnr>.stl'` in `&INPS`; without one it stops looking for
+`trees.inp.<expnr>`) and it rewrites `veg.inp` / `veg_params.inp`, so for
+`itree_mode = 1` the tool's files are copied in AFTER `write_inputs.sh`.
 
 ### 4.7 uDALES tools
 
@@ -1283,11 +1409,14 @@ Downloads are cached, so reruns need no network. In each
   (small sheds only).
 - `gap_fill.remaining_narrow_m2` about 0; `ground_missing_pct` about 0.
 
-Reference values (final builds of 2026-10-05, after the code-review fixes):
+Reference values (final builds of 2026-10-05, after the code-review fixes;
+`example` moved to Manhattan on 2026-10-11, its old row is kept as the
+South Kensington reference):
 
 | site | valid | buildings | faces | smallest face m² | hair cracks | gap fills (pieces, m²) | narrow columns before → after | courtyard fills (n, m²) | second-pass gap fills (n, m²) | dropped | plugs |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| example | yes | 204 | 11244 | 1.5e-3 | 0 | 33, 192.9 | 43 → 0 | 9, 174.1 | 1, 0.2 | 0 | 0 |
+| example (Manhattan, 2026-10-11) | yes | 340 | 14340 | 5.0e-5 | 0 | 145, 905.7 | 258 → 0 | 50, 961.9 | 34, 55.4 | 0 | 1 |
+| example until 2026-10-11 (South Kensington) | yes | 204 | 11244 | 1.5e-3 | 0 | 33, 192.9 | 43 → 0 | 9, 174.1 | 1, 0.2 | 0 | 0 |
 | compare_heights_osm | yes | 205 | 10714 | 1.8e-3 | 0 | 33, 192.9 | 43 → 0 | 9, 174.1 | 1, 0.2 | 0 | 0 |
 | compare_heights_lidar | yes | 203 | 11228 | 1.5e-3 | 0 | 33, 192.9 | 43 → 0 | 9, 174.1 | 1, 0.2 | 0 | 0 |
 | compare_gaps_filled | yes | 521 | 26908 | 5.0e-5 | 0 | 136, 583.4 | 228 → 0 | 65, 846.5 | 53, 61.7 | 1 | 1 |
@@ -1361,9 +1490,10 @@ Scratchpad scripts used for the recorded cases (superseded by
 
 Cases: `cases_full/` (401 = South Kensington STL from before 2026-09-28;
 402–404 = the 2026-09-29 STLs), `cases_full2/` (412–414) and `cases_full3/`
-(512–514): earlier 2026-10-05 runs, superseded; `cases_final/` (612 = example,
-613 = compare_gaps_filled, 614 = compare_gaps_open: the final STLs,
-byte-identical to the sites' `udales/geom.*.stl`); `cases_final_leb/` (301
+(512–514): earlier 2026-10-05 runs, superseded; `cases_final/` (612 = the
+South Kensington example as it was until 2026-10-11, 613 =
+compare_gaps_filled, 614 = compare_gaps_open: the final STLs of 2026-10-05,
+613/614 byte-identical to the sites' `udales/geom.*.stl`); `cases_final_leb/` (301
 South Kensington, 206 × 200 m; 302 Earl's Court, 200 × 200 m: sub-sites built
 with the final code, full lEB preprocessing). Grid of each case = the `grid`
 block of the site's `site.report.json`. Run one case at a time (§2.6).
@@ -1373,7 +1503,7 @@ STLs (612–614), checked with `case_check`:
 
 | site | narrow enclosed columns in uDALES `solid_c` (#367) | missing flux u / v / w / c [m²] | `facets_unused` |
 |---|---|---|---|
-| South Kensington (example) | 43 → 0 | 30.8 / 32.4 / 33.4 / 32.4 → 0 / 0 / 0 / 0 | 0 → 0 |
+| South Kensington (example until 2026-10-11) | 43 → 0 | 30.8 / 32.4 / 33.4 / 32.4 → 0 / 0 / 0 / 0 | 0 → 0 |
 | Earl's Court, gaps filled | 229 → 0 | 14.6 / 31.2 / 20.4 / 20.0 → 7.7 / 14.4 / 15.4 / 14.4 | 2 → 0 |
 | Earl's Court, gaps open | 297 → 0 | 399.6 / 568.0 / 554.8 / 550.9 → 235.8 / 330.6 / 345.7 / 345.1 | 12 → 16 |
 
@@ -1413,7 +1543,9 @@ folder's `*.log` files (one per grid, order u, v, w, c); only if no log has
 such lines, those of `ibm_stdout.txt`; otherwise a note that none were found.
 A header-only `solid_c.txt` (no solid cells) is read as an empty mask (numpy
 prints a warning). Exit codes: 0; 1 if cavities exist; 2 for unusable input
-(no argument, missing `namoptions` or `solid_c.txt`, no itot/jtot/ktot). Use
+(no argument, missing `namoptions` or `solid_c.txt`, no itot/jtot/ktot,
+cells in `solid_c.txt` outside itot/jtot/ktot: the namoptions changed after
+udprep ran). Use
 it after any change to dx, to the STL by hand, or to the grid-fit code.
 
 ### 5.5 Stress test (optional)
@@ -1542,10 +1674,12 @@ the veg_params id), `shape` (`box`/`hexagon`/`circle`) and `source` optional.
 Features that are not points or lack numeric `r` and `h` are skipped. Use
 `"vegetation": {"source": "file", "trees_file": "<path>"}`: no canopy data is
 needed and the file is used as given (trees centred in a building or fill are
-still dropped). Do not just drop a hand-made file into `sites/<name>/` as
+still dropped, and every crown is cut around the buildings on every run —
+the file keeps the full circles, `trees_plan.geojson` shows the cut).
+Do not just drop a hand-made file into `sites/<name>/` as
 `trees.geojson`: without a matching `canopy.provenance.json` it is moved to
 `trees.previous.geojson` and replaced by canopy-derived trees. With `"file"`,
-`overview.png` draws the trees of `trees_file`.
+`overview.png` draws the cut outlines of those trees (`trees_plan.geojson`).
 
 ### 6.5 Where a future UI would plug in
 
@@ -1585,8 +1719,27 @@ still dropped). Do not just drop a hand-made file into `sites/<name>/` as
   is on the safe side (a few extra fills), but it is not tested on a
   non-periodic site.
 - **Hair cracks under 1 m²** pass the build as a warning (stage 13). The
-  stress test (§5.5) still finds them in about 1 % of layouts (at most
-  0.1 m²); none on the five sites.
+  stress test (§5.5) still finds them in 2 of 150 layouts per seed (at most
+  0.27 m²).
+- **Slits of 1–3 cm** between solids pass the 1 cm hair-crack probe unseen;
+  a 5 cm probe finds 0.19 m² of such walls on the Manhattan example and
+  0.87 m² at Earl's Court (gaps filled). Their walls lie in solid cells. Not
+  adopted because it also flags 10–12 of 150 stress layouts (3 of 300 above
+  the 1 m² error threshold), code review 2026-10-11.
+- **Wedge gaps**: two walls meeting at an angle above about 23° enclose a
+  wedge whose tip is narrower than W; the mitre opening regrows it exactly,
+  so gap filling does not fill it and `remaining_narrow_m2` does not see it
+  (stage 10; gaps.py docstring).
+- **Hair-thin fills**: gap-fill pieces a few mm wide can survive as thin
+  solid slabs (the mirror image of a hair crack); no gate reports them. Their
+  walls lie in fluid cells on both sides and get no IBM sections.
+- **The Manhattan example has not been run through udprep IBM or
+  `case_check`** (only its vegetation cross-check loads the STL); the IBM
+  verification (§5.3) is for the London sites.
+- **Crowns at a periodic seam** are clipped at the domain edge, not wrapped
+  to the opposite side (stage 15d).
+- **Legacy `"extrude"` route** fails for a building standing inside another
+  building's courtyard (a disconnected mesh): use the default `"surface"`.
 - **End-to-end lattice test**: no offline test builds a site with the domain
   corner off the lattice (the individual layers are tested, §4.2).
 - **Facet types** backend not wired in (§6.3).
@@ -1594,9 +1747,6 @@ still dropped). Do not just drop a hand-made file into `sites/<name>/` as
   (prime: no decomposition in x); the recipe is `snap_m` = n × dx and `zsize`
   a multiple of n × dz.
 - **`las_dir`** is legacy and untested on real data.
-- **`trees.geojson` rounding** (1 mm positions and radii, 1 cm heights)
-  changes a few veg cells between the first build (unrounded, in memory) and
-  a rebuild from the file.
 - **Comparison figures** `sites/compare_*.png` predate courtyard filling and
   the code-review fixes.
 
@@ -1628,13 +1778,11 @@ still dropped). Do not just drop a hand-made file into `sites/<name>/` as
   `udales/`.
 - A `zsize` below the tallest building is not checked.
 - `height_source "osm"` does not disable `las_dir`.
-- `trees.geojson` is rewritten on every run; trees dropped by the building
-  filter are removed from it permanently.
+- Crowns are cut in plan only: canopy above a roof lower than the tree top
+  but higher than the crown base is removed too (stage 15d).
 - `gap_fills.geojson` shows first-pass fills before stage 11 changes them.
-- An Overpass reply with HTTP 200 but a "remark" about a timeout (partial
-  data) is accepted.
-- `wall_outwardness` reads 0.70–0.73 on the five current (correct) meshes,
-  which looks like a failure; nothing uses it.
+- `wall_outwardness` reads 0.63–0.73 on correct meshes and cannot detect an
+  inverted wall (stage 12); nothing uses it.
 - `ndsm.tif` and `heights.provenance.json` stay when a later run uses no
   LiDAR.
 - Orphan zips `cache/lidar_composite_*.zip` (about 130 MB per folder) from an
@@ -1668,8 +1816,7 @@ Heights:
 - the `england_tiles` fallback source;
 - `heights.provenance.json` (same content in `site.report.json`);
 - the `las_dir` point-cloud route (about 90 lines, 6 config keys);
-- `lidar_inset_m` (rated not needed by the audit; the test
-  `test_lidar_height_is_roof_percentile_not_eaves` relies on it);
+- `lidar_inset_m` (rated not needed by the audit; no test isolates it);
 - the LiDAR − OSM statistic (nice-to-have).
 
 Mesh and checks:
@@ -1699,7 +1846,7 @@ Vegetation:
   give almost the same labels);
 - the udprep cross-check on every build;
 - `vegetation.report.json` (same content in `site.report.json`);
-- `cap_radius_to_buildings`.
+- `cap_radius_to_buildings` (superseded by the crown cut, stage 15d).
 
 Orchestration:
 - the provisional grid in `build_site`;

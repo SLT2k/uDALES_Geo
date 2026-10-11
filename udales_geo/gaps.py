@@ -9,13 +9,16 @@ in the sun). This affects every case (the default iwallmom = 2 reads the same
 sections), not only energy-balance (lEB) runs, so filling is ON by default.
 
 WHAT IS FILLED
-Every part of the open ground narrower than W = gap_fill_width_dx * dx:
-slits between buildings, L-shaped gaps, narrow courtyards, notches in one
-building. One pass, by a morphological opening of the open ground with
-square ("mitre") corners:
+The parts of the open ground narrower than W = gap_fill_width_dx * dx that a
+morphological opening removes: slits between buildings, L-shaped gaps,
+narrow courtyards, notches in one building. One pass, by an opening of the
+open ground with square ("mitre") corners:
     G = open ground,  O = G shrunk by W/2 then grown back by W/2,  fill = G - O
 Open ground W or wider is never touched. Buildings that touch exactly (party
-walls) have no gap and are left alone.
+walls) have no gap and are left alone. LIMITATION: a wedge between two walls
+meeting at an angle of more than ~23 degrees is regrown exactly by the mitre
+(shapely's mitre_limit 5), so its narrow tip is NOT filled whatever W, and
+remaining_narrow_area cannot see it either (code review 2026-10-11).
 
 HEIGHT OF A FILL ("layered")
 The highest level z at which the spot is still a sub-W gap among the

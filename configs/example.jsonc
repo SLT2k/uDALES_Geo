@@ -1,4 +1,4 @@
-// Example case: South Kensington
+// Example case: West Village, Manhattan (OSM heights, Meta canopy map)
 //
 // Every parameter is listed with its meaning after the "//". Values are the
 // defaults except where a comment says "(example; default ...)". To make your
@@ -9,15 +9,17 @@
 {
   // ======================== site & grid ========================
   "name": "example",               // output folder: sites/<name>/
-  "corners": [[-0.1795, 51.4975],  // two OPPOSITE corners of the area, [longitude, latitude].
-              [-0.1715, 51.5035]], //   openstreetmap.org shows #map=zoom/LAT/LON (latitude FIRST) — swap them
+  "corners": [[-74.00841, 40.73477],  // two OPPOSITE corners of the area, [longitude, latitude].
+              [-74.00277, 40.73206]], //   openstreetmap.org shows #map=zoom/LAT/LON (latitude FIRST) — swap them
   "crs": "auto",                   // map projection in metres; "auto" = UTM zone of the site. Or e.g. "EPSG:27700"
   "snap_m": 2.0,                   // (example; default 1.0) the domain is enlarged (never shrunk) to a
                                    //   multiple of this: use dx, or n x dx for core counts dividing by n
-  "dx": 2.0,                       // horizontal grid spacing [m] (dx = dy)
+  "dx": 2.0,                       // horizontal grid spacing [m]; dx = dy = this only when xlen and
+                                   //   ylen are multiples of it (snap_m = n x dx); else xlen/itot
   "dz": null,                      // vertical grid spacing [m]; null = same as dx
-  "zsize": null,                   // domain height [m]; null = max(96, 3 x tallest building)
-  "expnr": "001",                  // uDALES experiment number, used in file names (3 digits)
+  "zsize": null,                   // domain height [m]; null = max(96, 3 x tallest building);
+                                   //   always rounded UP to a multiple of dz
+  "expnr": "001",                  // uDALES experiment number 0-999, used in file names (3 digits)
   "udales_tools": "F:/stl/u-dales/tools/python",  // CHANGE: <your u-dales clone>/tools/python
                                                   //   (or delete and set the UDALES_TOOLS environment variable)
   "output_dir": null,              // null = sites/<name>/ next to the configs folder
@@ -39,7 +41,8 @@
     "min_height": 2.0,             // [m] buildings lower than this are left out (a footprint LiDAR sees
                                    //   lower than this keeps only an OSM height, else it is left out)
     "min_area": 1.0,               // [m2] footprints smaller than this are left out
-    "max_plausible_height": 300.0, // [m] heights above this are capped
+    "max_plausible_height": 300.0, // [m] a LiDAR height above this is treated as noise (the OSM
+                                   //   height / default_height is used); an OSM height above it is capped
     "height_attribute": "height",  // property holding the height in buildings_osm.geojson
                                    //   (use this name when you add buildings in QGIS)
     "simplify_tolerance": 0.0,     // [m] smooth footprint outlines; 0 = keep OSM shapes exactly
@@ -81,7 +84,8 @@
                                    //   centre: invisible to uDALES, their facets would get no fluxes
 
     // --- mesh generation (advanced; leave as is) ---
-    "method": "surface",           // "surface" = one watertight city surface (recommended); "extrude" = old method
+    "method": "surface",           // "surface" = one connected city surface, open along the domain edge
+                                   //   (recommended); "extrude" = old method
     "partition_grid_m": 25.03,     // [m] helper grid for meshing; odd value on purpose (avoids data-aligned edges)
     "boundary_inset": 0.02,        // [m] footprints are kept this far inside the domain edge
     "snap_precision": 0.01,        // [m] coordinate grid for overlaps, fills and meshing (the domain corner
@@ -110,28 +114,35 @@
     "las_crs": null,               // only if the LAS files don't state their projection, e.g. "EPSG:7856"
     "veg_classes": [3, 4, 5],      // LAS classification codes of vegetation (low, medium, high)
     "ea_year": null,               // England: survey year to download; null = latest
-    "trees_file": null,            // source "file": path to a trees.geojson
+    "trees_file": null,            // source "file": path to a trees.geojson in the site's metric
+                                   //   CRS (as the tool writes it; not lon/lat)
 
-    // --- finding individual trees ---
+    // --- finding individual trees (these and the source keys above take effect when the
+    //     trees are rebuilt: first run, --redo-trees, or a moved domain; trees.geojson is reused) ---
     "chm_res": 1.0,                // [m] resolution of the tree-height map used
     "min_canopy_height": 3.0,      // [m] lower vegetation is ignored
     "smooth_sigma_m": 1.0,         // [m] smoothing before looking for tree tops
     "min_peak_distance_m": 3.0,    // [m] minimum distance between two tree tops
     "min_crown_area": 5.0,         // [m2] smaller crowns are dropped
     "max_crown_area": 2000.0,      // [m2] larger crowns (woods that can't be split) are dropped
-    "mask_buildings_buffer_m": 1.0,// [m] no trees within this distance of buildings
-    "cap_radius_to_buildings": false, // true = shrink crowns so they never touch a building
+    "mask_buildings_buffer_m": 1.0,// [m] canopy within this distance of a building is ignored
+                                   //   (satellite maps paint tree heights on roofs)
+    "trunk_offset": 2.0,           // [m] height of the crown base above the ground (stored in
+                                   //   trees.geojson as "base")
 
-    // --- tree shape ---
-    "trunk_offset": 2.0,           // [m] height of the crown base above the ground
-    "shape": "hexagon",            // (example; default "box") "box" (grid-cell block) | "hexagon" | "circle"
+    // --- tree shape (applies on every run; every crown is cut around the buildings and fills) ---
+    "cap_radius_to_buildings": false, // true = also cap each crown radius at 0.95 x its distance to the
+                                   //   nearest modelled building (nearer crowns shrink on all sides; not
+                                   //   needed: crowns are always cut around buildings, trees_plan.geojson)
+    "shape": "box",                // "box" (grid-cell block) | "hexagon" | "circle"
     "hex_radius": "circumscribed", // hexagon only: "circumscribed" (corners on the crown radius) | "inscribed" (larger)
 
     // --- uDALES output ---
     "voxel_method": "exact",       // (example; default "udprep")
                                    // "udprep" = same cells as uDALES's own tool (crowns ~1 cell wider per side)
                                    // "exact"  = only cells inside the tree (true volume)
-    "drop_cells_in_buildings": true, // remove tree cells that fall inside buildings
+    "drop_cells_in_buildings": true, // remove tree cells that still fall inside buildings ("udprep"
+                                   //   makes crowns one cell wider, so a few can, next to walls)
     "udprep_check": true,          // re-run uDALES's own converter and confirm the files match
     "params": {                    // canopy parameters written to veg_params.inp / &TREES (London plane tree)
       "lad": 1.0,                  // leaf area density [m2/m3]

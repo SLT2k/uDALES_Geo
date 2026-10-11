@@ -139,3 +139,32 @@ def test_noding_never_moves_a_corner_onto_a_neighbour_1cm_away():
     out, _ = node_together([A, B], SNAP)
     assert _crack_count(out, x0, y0) == 0
     assert out[0][0].intersection(out[1][0]).area < 1e-9
+
+
+# ---- 2026-10-11 review -------------------------------------------------------
+def test_hair_crack_check_finds_a_known_crack():
+    # positive control for the build-stopping gate: every other crack test
+    # only asserts "no crack"
+    import contextlib, io
+    from udales_geo.buildings import HAIR_CRACK_M, _hair_cracks
+
+    def crack_area(gap):
+        fph = [(box(10, 10, 20, 20), 12.0, {}), (box(20 + gap, 10, 30, 20), 9.0, {})]
+        with contextlib.redirect_stdout(io.StringIO()):
+            mesh, _ = build_city_surface(fph, 50.0, 50.0, grid_spacing=25.03, snap=0.001)
+        return float(mesh.area_faces[_hair_cracks(mesh, HAIR_CRACK_M)].sum())
+    assert crack_area(0.005) == pytest.approx(210.0, rel=1e-3)  # both walls: 10 x 12 + 10 x 9
+    assert crack_area(0.02) == 0.0                              # wider than HAIR_CRACK_M
+    assert crack_area(0.0) == 0.0                               # touching: a party wall
+
+
+def test_overlaps_are_resolved_tallest_first():
+    import contextlib, io
+    from udales_geo.buildings import resolve_footprint_overlaps
+    low, tall = box(0, 0, 10, 10), box(5, 0, 15, 10)
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = resolve_footprint_overlaps([(low, 8.0, {"id": "low"}), (tall, 20.0, {"id": "tall"}),
+                                          (tall, 20.0, {"id": "dup"})], snap=SNAP)
+    area = {pr["id"]: p.area for p, _, pr in out}
+    assert area == pytest.approx({"tall": 100.0, "low": 50.0})   # the duplicate vanished
+    assert {pr["id"]: h for _, h, pr in out} == {"tall": 20.0, "low": 8.0}

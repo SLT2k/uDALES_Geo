@@ -35,7 +35,11 @@ MIN_FACE_AREA = 1e-6
 # with a total wall area of HAIR_CRACK_MAX_M2 or more stop the build (that
 # size means a systematic bug: the 2026-10 lattice offset gave 35-160 m2);
 # smaller ones are reported as a warning (the mesher's own snapping leaves
-# cm-wide crevices of up to ~0.3 m2 in ~1 % of awkward synthetic layouts).
+# cm-wide crevices, at most 0.27 m2 in 2 of 150 random layouts per seed of
+# tools/geometry_stress.py). Slits of 1-3 cm pass unseen (0.19 m2 of wall on
+# the Manhattan example, 0.87 m2 at Earl's Court). A 5 cm probe sees them but
+# also flags 10-12 of 150 stress layouts, 3 of 300 above 1 m2 (code review
+# 2026-10-11), so it was not adopted.
 HAIR_CRACK_M = 0.01
 HAIR_CRACK_MAX_M2 = 1.0
 
@@ -84,7 +88,10 @@ def _write_fills(path, fills, crs, kind, extra_gap_fills=()):
 
 
 def resolve_footprint_overlaps(fph, min_part_area=1.0, snap=0.01):
-    """polyprep-equivalent: make footprints tile the plan without overlaps.
+    """polyprep-equivalent: make footprints tile the plan without overlaps
+    (up to slivers below the snap step along slanted shared edges, where the
+    rounded difference bends an edge by < 1 cm; node_together and the
+    mesher's tallest-wins rule absorb them).
 
     Real cadastral data (OSM building:part, duplicated outlines, terraces)
     overlaps routinely; extruding overlapping solids yields floating components
@@ -319,7 +326,7 @@ def build_buildings(cfg: Config) -> dict:
     yards_path = out_stl.parent / "courtyard_fills.geojson"
     if bcfg.get("fill_courtyards", True):
         yards, fit["courtyards"] = fill_courtyards(fph, cfg.bbox, dx, dy, dz, ni, nj,
-                                                   snap, min_cells)
+                                                   snap, min_cells, inset=inset)
         more = []
         if yards:
             fph = absorb_into_fills(fph, yards, snap)
@@ -475,7 +482,7 @@ def build_buildings(cfg: Config) -> dict:
         print(f"[buildings] {msg}")
         report = dict(report, valid=False, issues=list(report.get("issues", [])) + [msg])
 
-    # ---- hair cracks: walls facing solid again within 1 cm (_hair_cracks) ----
+    # ---- hair cracks: walls facing solid again within HAIR_CRACK_M (_hair_cracks) ----
     # A crack this thin can only come from an OSM slit (gap filling off) or a
     # tool bug (gap filling on): its walls lie in solid cells and get no heat
     # or momentum exchange in uDALES. Error with filling on, warning without.

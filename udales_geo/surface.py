@@ -8,7 +8,8 @@ Sources, in order:
      the same vertical datum) — any country
   2. the shared downloader (rasters.py): England, Netherlands, Flanders +
      Brussels, France — "lidar_source": "auto" picks the one covering the site
-Returns None when neither applies (the caller then keeps OSM heights).
+Returns (None, info) when neither applies (the caller then keeps OSM heights
+and records info: the sources tried and their failures).
 """
 from __future__ import annotations
 
@@ -23,8 +24,11 @@ from .rasters import fetch_ndsm, fill_holes
 
 
 def get_ndsm(bcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path):
-    """Return (ndsm, provenance) or None. Also writes ndsm.tif (for QGIS)."""
+    """Return (ndsm, provenance), or (None, info) (see rasters.fetch_ndsm).
+    Also writes ndsm.tif (for QGIS)."""
     import rasterio
+
+    from .common import ConfigError
 
     def p(v):
         v = Path(v)
@@ -32,7 +36,7 @@ def get_ndsm(bcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path):
 
     if bcfg.get("dsm_file") or bcfg.get("dtm_file"):
         if not (bcfg.get("dsm_file") and bcfg.get("dtm_file")):
-            raise ValueError('building heights need BOTH "dsm_file" and "dtm_file"')
+            raise ConfigError('building heights need BOTH "dsm_file" and "dtm_file"')
         dsm, dtm = site.empty(), site.empty()
         for arr, key in ((dsm, "dsm_file"), (dtm, "dtm_file")):
             with rasterio.open(p(bcfg[key])) as src:
@@ -44,10 +48,10 @@ def get_ndsm(bcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path):
                 "dtm_file": str(p(bcfg["dtm_file"])), "dtm_pixels_filled": n_filled,
                 "coverage_of_site": round(float(np.isfinite(ndsm).mean()), 4)}
     else:
-        got = fetch_ndsm(site, site_dir / "cache" / "lidar", bcfg.get("lidar_source", "auto"))
-        if got is None:
-            return None
-        ndsm, prov = got
+        ndsm, prov = fetch_ndsm(site, site_dir / "cache" / "lidar",
+                                bcfg.get("lidar_source", "auto"))
+        if ndsm is None:
+            return None, prov
 
     prov.update({"res_m": site.res, "crs": site.crs,
                  "made_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})

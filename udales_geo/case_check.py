@@ -125,6 +125,11 @@ def main(argv=None) -> int:
     solid = np.zeros((ni, nj, nk), dtype=bool)
     if ijk.size:
         ijk = ijk.reshape(-1, 3) - 1
+        if ijk.min() < 0 or (ijk.max(axis=0) >= np.array((ni, nj, nk))).any():
+            print(f"[case_check] solid_c.txt has cells outside itot/jtot/ktot = {ni}/{nj}/{nk} "
+                  f"of {nml_path.name}: the namoptions changed after udprep ran (rerun it)",
+                  file=sys.stderr)
+            return 2
         solid[ijk[:, 0], ijk[:, 1], ijk[:, 2]] = True
     comp, cells, cols = narrow_cavities(solid, periodic=periodic)
     print(f"[case_check] {case}: narrow enclosed cavities: {comp} components, {cells} cells, "

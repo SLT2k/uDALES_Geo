@@ -33,6 +33,16 @@ def setv(text, key, value):
     return pat.sub(lambda m: f"{m.group(1)}{value}", text, count=1)
 
 
+def insert_after(text, key, lines):
+    """Insert lines after the `key = ...` line; fail loudly if there is none
+    (a silent miss would check the site with the wrong settings)."""
+    pat = re.compile(rf"^(\s*{key}\s*=[^\n]*\n)", re.M | re.I)
+    text, n = pat.subn(lambda m: m.group(1) + lines + "\n", text, count=1)
+    if n != 1:
+        raise KeyError(f"no '{key} =' line in the template namoptions")
+    return text
+
+
 def main(argv):
     args = [a for a in argv if a != "--ibm-only"]
     if len(args) < 2:
@@ -58,10 +68,8 @@ def main(argv):
     if "--ibm-only" in argv:
         nml = setv(nml, "lEB", ".false.")
     else:   # udprep writes sparse view factors; the solver default reads the dense file
-        nml = nml.replace("lEB          = .true.\n", "lEB          = .true.\nlvfsparse    = .true.\n")
-    inps = ["nompthreads  = 1"] + extra
-    nml = nml.replace(f"stl_file     = geom.{expnr}.stl\n",
-                      f"stl_file     = geom.{expnr}.stl\n" + "\n".join(inps) + "\n")
+        nml = insert_after(nml, "lEB", "lvfsparse    = .true.")
+    nml = insert_after(nml, "stl_file", "\n".join(["nompthreads  = 1"] + extra))
     (case / f"namoptions.{expnr}").write_text(nml, encoding="ascii", newline="\n")
     print(case)
 

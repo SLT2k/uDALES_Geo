@@ -192,3 +192,33 @@ def test_domain_corner_is_rounded_like_geos_rounds_outlines():
                                           (x, y, x + 100, y + 100)), SNAP)
         geos = shapely.set_precision(Point(x, y), SNAP)
         assert (reg.bbox[0], reg.bbox[1]) == (shapely.get_x(geos), shapely.get_y(geos))
+
+
+# ---- 2026-10-11 review -------------------------------------------------------
+def test_cell_square_fill_at_the_domain_edge_stays_inside_the_domain():
+    # a one-cell pocket at the west edge, closed across the periodic seam by
+    # the building at the east edge: its fill used to reach 2 cm outside x = 0
+    fph = [b(0.02, 6, 10, 10, 12.0), b(0.02, 13, 10, 17, 12.0), b(3, 10, 10, 13, 12.0),
+           b(50, 6, 59.98, 17, 12.0)]
+    assert census(fph)["narrow_columns"] >= 1
+    fills, _, out = run(fph)
+    assert fills
+    for p, _, _ in fills:
+        x0, y0, x1, y1 = p.bounds
+        assert x0 >= X0 + 0.02 - 1e-6 and y0 >= Y0 + 0.02 - 1e-6
+        assert x1 <= X0 + 60 - 0.02 + 1e-6 and y1 <= Y0 + 60 - 0.02 + 1e-6
+    assert census(out)["narrow_columns"] == 0
+
+
+def test_ibm_tolerance_band_below_a_cell_centre():
+    # udprep counts a centre up to 5e-4 m above a roof as solid: a pocket whose
+    # floor is 0.3 mm below the level-1 centre (z = 3 m) is solid there, one 1 mm
+    # below is fluid there -> exactly one more narrow level
+    import numpy as np
+
+    def narrow_cells(floor):
+        H = np.full((10, 10), 20.0)
+        H[0, :] = 0.0                       # the street
+        H[5, 5] = floor                     # a one-cell pocket
+        return narrow_enclosed(H, DZ, 3)[1]["narrow_cells"]
+    assert narrow_cells(2.999) - narrow_cells(2.9997) == 1

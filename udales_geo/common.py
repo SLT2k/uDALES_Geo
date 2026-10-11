@@ -177,7 +177,9 @@ def load_jsonc(path: str | Path) -> dict:
             continue
         elif text.startswith("/*", i):
             end = text.find("*/", i + 2)
-            i = n if end < 0 else end + 2
+            stop = n if end < 0 else end + 2
+            out.append("\n" * text.count("\n", i, stop))   # keep error line numbers right
+            i = stop
             continue
         else:
             out.append(c)

@@ -22,7 +22,12 @@ Two additions over udprep (both methods):
   - veg_params id = tree number from trees.geojson ("tree/0007" -> 7);
     udprep writes id=1 for every cell.
   - cells whose centre lies inside a building column are dropped (udprep has
-    no such check; vegetation inside solid IBM cells would apply drag in walls).
+    no such check). In the solver such a cell changes nothing for the flow,
+    the velocity in a solid cell being zero, but it would count in the tree
+    statistics and, with itree_mode 2, get a radiation row and release heat
+    inside the wall. The tree solids are already cut around the buildings
+    (trees.tree_solid), so this only catches the ~1-cell dilation of the
+    udprep method next to walls; with method "exact" it drops nothing.
 
 udprep_crosscheck() re-runs udprep's native load_stl on the same STL:
   method "udprep": ours == native minus exactly the in-building drops
@@ -59,24 +64,33 @@ def _cells_of(mesh, pitch, xt, yt, zt) -> list:
 
 
 def _building_top_map(footprints_sim, grid):
-    """(jtot, itot) map of building-top height at cell centres (0 = no building)."""
-    from affine import Affine
-    from rasterio.features import rasterize
+    """(jtot, itot) map of the tallest building top at each cell centre
+    (0 = no building). A centre ON an outline counts as inside, as in udprep's
+    IBM (a point on a facet is solid) and in grid_fit.cell_centre_heights.
+    Outlines and centres are both rounded to 1 um first: the sidecar holds
+    world minus origin, a float difference that can leave a wall 1e-10 m
+    beside a cell centre it passes through exactly in the float32 STL udprep
+    reads, and (i + 1/2) dx is not exact for every dx (1.2 m)."""
+    import shapely
+    from shapely.strtree import STRtree
     if not footprints_sim:
         return None
-    shapes = sorted(footprints_sim, key=lambda gh: gh[1])  # tallest painted last
-    return rasterize(shapes, out_shape=(grid.jtot, grid.itot),
-                     transform=Affine(grid.dx, 0.0, 0.0, 0.0, grid.dy, 0.0),  # row 0 = y=0
-                     fill=0.0, dtype="float64")
+    polys = [shapely.set_precision(p, 1e-6) for p, _ in footprints_sim]
+    heights = np.array([h for _, h in footprints_sim], dtype=float)
+    gx, gy = np.meshgrid(grid.xt(), grid.yt())            # row j = yt[j], column i = xt[i]
+    pts = shapely.set_precision(shapely.points(gx.ravel(), gy.ravel()), 1e-6)
+    pt_idx, poly_idx = STRtree(polys).query(pts, predicate="intersects")
+    top = np.zeros(gx.size)
+    np.maximum.at(top, pt_idx, heights[poly_idx])
+    return top.reshape(grid.jtot, grid.itot)
 
 
-def _cells_exact(solid, xt, yt, zt) -> list:
-    """Cells whose centre is strictly inside a convex vertical prism (our
-    hexagon/box trees): plan polygon test + z range. 0-based (i, j, k)."""
+def _cells_exact(plan, z0, z1, xt, yt, zt) -> list:
+    """Cells whose centre is strictly inside the vertical prism plan x
+    [z0, z1] (plan: the tree's cut outline, Polygon or MultiPolygon).
+    0-based (i, j, k)."""
     import shapely
-    from shapely.geometry import MultiPoint
-    (x0, y0, z0), (x1, y1, z1) = solid.bounds
-    plan = MultiPoint(solid.vertices[:, :2]).convex_hull
+    x0, y0, x1, y1 = plan.bounds
     xi = np.where((xt > x0) & (xt < x1))[0]
     yi = np.where((yt > y0) & (yt < y1))[0]
     zi = np.where((zt > z0) & (zt < z1))[0]
@@ -90,8 +104,11 @@ def _cells_exact(solid, xt, yt, zt) -> list:
 
 def voxelize_trees(solids: list, tree_numbers: list, grid, footprints_sim=None,
                    drop_in_buildings: bool = True, method: str = "udprep",
-                   stl_path: Path | None = None):
-    """solids[i] is the watertight solid of tree number tree_numbers[i].
+                   stl_path: Path | None = None, plans: list | None = None):
+    """solids[i] is the watertight solid of tree number tree_numbers[i];
+    plans[i] = (plan, z0, z1) its cut outline and height range (method
+    "exact" selects cells from the plan, so non-convex and split crowns
+    are right).
     stl_path: the exported trees STL. For method "udprep" the cell set is
     taken from THAT FILE loaded exactly like udprep loads it (float32
     vertices, merged) — the in-memory float64 mesh can differ by a few
@@ -109,9 +126,11 @@ def voxelize_trees(solids: list, tree_numbers: list, grid, footprints_sim=None,
     pitch = float(min(grid.dx, grid.dy, float(np.min(grid.dzt()))))
 
     if method == "exact":
+        if plans is None:
+            raise ValueError("voxel method 'exact' needs the trees' plans")
         cells = {}
-        for num, s in zip(tree_numbers, solids):
-            for ijk in _cells_exact(s, xt, yt, zt):
+        for num, (plan, z0, z1) in zip(tree_numbers, plans):
+            for ijk in _cells_exact(plan, z0, z1, xt, yt, zt):
                 cells.setdefault(ijk, num)       # overlapping crowns: first tree keeps it
     elif method == "udprep":
         # the authoritative cell SET comes from one whole-mesh voxelization
@@ -123,7 +142,8 @@ def voxelize_trees(solids: list, tree_numbers: list, grid, footprints_sim=None,
                 if cells.get(ijk) == 0:
                     cells[ijk] = num
         unlabeled = [ijk for ijk, n in cells.items() if n == 0]
-        if unlabeled:  # fringe cells -> nearest tree axis
+        if unlabeled:  # fringe cells -> nearest tree axis in plan (height not
+            # considered: ids are for tracing only, the solver does not use them)
             centres = np.array([s.centroid[:2] for s in solids])
             pts = np.array([[xt[i], yt[j]] for i, j, _ in unlabeled])
             _, near = cKDTree(centres).query(pts)
@@ -148,8 +168,11 @@ def voxelize_trees(solids: list, tree_numbers: list, grid, footprints_sim=None,
     return cells, stats
 
 
-def write_udales_files(cells: dict, params: dict, expnr: str, out_dir: Path) -> dict:
-    """Write veg.inp.<expnr>, veg_params.inp.<expnr> and the &TREES snippet."""
+def write_udales_files(cells: dict, params: dict, expnr: str, out_dir: Path,
+                       method: str = "udprep", n_in_buildings: int = 0) -> dict:
+    """Write veg.inp.<expnr>, veg_params.inp.<expnr> and the &TREES snippet.
+    method and n_in_buildings (cells the building filter removed) only word
+    the snippet's note on what udprep would make from the trees STL."""
     items = sorted(cells.items())  # deterministic order: i, j, k
     lad, cd, ud = float(params["lad"]), float(params["cd"]), float(params["ud"])
     dec, lsize, r_s = float(params["dec"]), float(params["lsize"]), float(params["r_s"])
@@ -169,15 +192,26 @@ def write_udales_files(cells: dict, params: dict, expnr: str, out_dir: Path) -> 
 
     # LF endings on purpose: this gets pasted into namoptions on the HPC, and
     # CRLF inside a Fortran namelist is compiler-dependent breakage
+    import textwrap
+    if method == "udprep":
+        same = ("the same cells as these" + (
+            f" plus the {n_in_buildings} next to walls that lie inside buildings "
+            "(removed here; udprep has no building filter)" if n_in_buildings else ""))
+    else:
+        same = ("about one cell more per side of each crown than these (voxel_method "
+                "\"exact\" keeps only cells inside the solids), some of them next to walls "
+                "inside buildings")
+    regen = textwrap.wrap(
+        f"write_inputs.sh -p re-runs vegetation preprocessing when ltrees is on. With "
+        f"treesfile = 'trees.{expnr}.stl' in &INPS (the tree solids, cut around the "
+        f"buildings) udprep makes {same}, all with id 1.", 76)
     snippet = out_dir / f"namoptions.trees.{expnr}"
     with open(snippet, "w", encoding="ascii", newline="\n") as f:
         f.write(
             f"! &TREES block for namoptions.{expnr} (generated by udales_geo).\n"
             f"! Copy veg.inp.{expnr} and veg_params.inp.{expnr} into the case folder.\n"
             f"! ntrees is informational - the solver counts veg.inp rows.\n"
-            f"! write_inputs.sh -p re-runs vegetation preprocessing when ltrees is on:\n"
-            f"! set  treesfile = 'trees.{expnr}.stl'  in &INPS so it regenerates the same\n"
-            f"! cells (minus our in-building filter and per-tree ids).\n"
+            + "".join(f"! {line}\n" for line in regen) +
             f"! Drag-only trees (itree_mode = 1, below): you may copy these two veg files\n"
             f"! back over udprep's output afterwards.\n"
             f"! Energy-balance trees (itree_mode = 2): do NOT copy them back - udprep also\n"

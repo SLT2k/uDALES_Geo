@@ -23,11 +23,15 @@ def test_each_courtyard_goes_only_to_the_outline_that_contains_it():
 
 
 def test_courtyard_goes_to_the_smallest_containing_outline():
-    # building with a courtyard, and a second building standing inside that courtyard
+    # a building with a courtyard, and a second building standing in that
+    # courtyard with a courtyard of its own: the inner one is covered by BOTH
+    # outlines and must go to the smaller one
     outers = [ring(0, 0, 50, 50), ring(20, 20, 30, 30)]
-    inners = [ring(10, 10, 40, 40)]
-    holes, _ = _holes_per_outer(outers, inners)
-    assert holes == [[inners[0]], []]
+    inners = [ring(10, 10, 40, 40), ring(22, 22, 28, 28)]
+    holes, n_orphan = _holes_per_outer(outers, inners)
+    assert holes == [[inners[0]], [inners[1]]] and n_orphan == 0
+    for o, hs in zip(outers, holes):
+        assert Polygon(o, hs).is_valid
 
 
 def test_courtyard_outside_every_outline_is_dropped():

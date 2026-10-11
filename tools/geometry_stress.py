@@ -75,7 +75,7 @@ def chain(fph, x0, y0):
     fills, _ = fill_gaps(fph, bbox, DX, 0.02, SNAP)
     fph, _ = thread_through_fills(fph, fills, SNAP)
     fph = fph + fills
-    yards, _ = fill_courtyards(fph, bbox, DX, DX, DZ, N, N, SNAP)
+    yards, _ = fill_courtyards(fph, bbox, DX, DX, DZ, N, N, SNAP, inset=0.02)
     if yards:
         fph = absorb_into_fills(fph, yards, SNAP)
         fph, _ = thread_through_fills(fph, yards, SNAP)

@@ -10,6 +10,13 @@ Implemented in udales_geo (`udales_geo/rasters.py`, tested end to end 2026-09-28
 own files** (`dsm_file` + `dtm_file`, or `las_dir`) anywhere. Norway (Kartverket WCS) was
 tested and left out: its DTM returned HTTP 504 on 9 of 16 small requests.
 
+England is implemented with the **LZ (last-return) DSM** (coverage
+`9ba4d5ac-d596-445a-9056-dae3ddec0178__Lidar_Composite_Elevation_LZ_DSM_1m`),
+not the FZ (first-return) DSM the research rows below recommend: canopy
+overhanging a footprint raises a first-return DSM, not a last-return one. The
+FZ id is kept below for reference; the rows, the cities table and the
+"suggested next downloaders" are the research record of 2026-09-28.
+
 ## Sources
 
 | region | source | access | products | resolution / years | coverage |

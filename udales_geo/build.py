@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 from pathlib import Path
 
@@ -43,17 +44,30 @@ DEFAULTS = {
 }
 
 
-def _remove_stale_veg(udales_dir: Path, expnr: str) -> None:
-    """Vegetation is off: don't leave veg files from an earlier run next to
-    geom.<expnr>.stl, where someone would copy them to the HPC."""
-    stale = [udales_dir / n for n in (f"veg.inp.{expnr}", f"veg_params.inp.{expnr}",
-                                      f"namoptions.trees.{expnr}", f"trees.{expnr}.stl")]
-    stale = [p for p in stale if p.exists()]
-    for p in stale:
-        p.unlink()
-    if stale:
-        print(f"[build] vegetation is off: removed {len(stale)} old vegetation file(s) from "
-              f"{udales_dir.name}/")
+def _num(site: dict, key: str, default: float) -> float:
+    """A number from the config; a missing key and null both give the default."""
+    v = site.get(key)
+    return float(default if v is None else v)
+
+
+def _expnr(site: dict) -> str:
+    """The 3-digit experiment number: uDALES names every input file *.<i3.3>."""
+    raw = site.get("expnr", "001")
+    s = str(raw).strip()
+    if not re.fullmatch(r"[0-9]{1,3}", s):
+        raise ConfigError(f'"expnr" must be a whole number from 0 to 999 (uDALES opens '
+                          f'files named *.<3 digits>); got {raw!r}')
+    return s.zfill(3)
+
+
+def _grid_report(grid) -> dict:
+    """The grid block of site.report.json: the spacings the build used
+    (xlen/itot, ylen/jtot, zsize/ktot), not the configured dx."""
+    return {"dx": grid.dx, "dy": grid.dy, "dz": grid.zsize / grid.ktot, "itot": grid.itot,
+            "jtot": grid.jtot, "ktot": grid.ktot, "xlen": grid.xlen,
+            "ylen": grid.ylen, "zsize": grid.zsize,
+            "note": "vegetation cells were computed on this grid; set dz/zsize "
+                    "in the config to match your case"}
 
 
 def _suggest_grid(region, dx: float, h_max: float, dz: float | None = None,
@@ -72,7 +86,7 @@ def _suggest_grid(region, dx: float, h_max: float, dz: float | None = None,
 
 
 def _overview_png(out_dir: Path, name: str, region, lam_p: float, n_bld: int,
-                  trees: list | None = None, framed_bbox: tuple | None = None):
+                  n_trees: int = 0, framed_bbox: tuple | None = None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -81,31 +95,40 @@ def _overview_png(out_dir: Path, name: str, region, lam_p: float, n_bld: int,
     from matplotlib.patches import PathPatch
     from matplotlib.path import Path as MplPath
     from shapely import wkt as _wkt
+    from shapely.geometry import shape as _shape
+
+    def _patches(geoms):
+        out = []
+        for g in geoms:
+            polys = [g] if g.geom_type == "Polygon" else list(g.geoms)
+            for p in polys:
+                verts, codes = [], []
+                for ring in [p.exterior, *p.interiors]:
+                    r = np.asarray(ring.coords)
+                    verts.extend(r)
+                    codes.extend([MplPath.MOVETO] + [MplPath.LINETO] * (len(r) - 1))
+                out.append(PathPatch(MplPath(verts, codes)))
+        return out
 
     sidecar = json.loads((out_dir / "buildings.footprints.json")
                          .read_text(encoding="utf-8-sig"))
     patches, colors = [], []
     for rec in sidecar:
-        g = _wkt.loads(rec["wkt"])
-        polys = [g] if g.geom_type == "Polygon" else list(g.geoms)
-        for p in polys:
-            verts, codes = [], []
-            for ring in [p.exterior, *p.interiors]:
-                r = np.asarray(ring.coords)
-                verts.extend(r)
-                codes.extend([MplPath.MOVETO] + [MplPath.LINETO] * (len(r) - 1))
-            patches.append(PathPatch(MplPath(verts, codes)))
-            colors.append(rec["height"])
+        pp = _patches([_wkt.loads(rec["wkt"])])
+        patches.extend(pp)
+        colors.extend([rec["height"]] * len(pp))
     fig, ax = plt.subplots(figsize=(7, 7 * region.ylen / max(region.xlen, 1)))
     pc = PatchCollection(patches, cmap="viridis", edgecolor="k", linewidth=0.3)
     pc.set_array(np.asarray(colors))
     ax.add_collection(pc)
     fig.colorbar(pc, ax=ax, shrink=0.7, label="building height [m]")
-    if trees:
-        from matplotlib.patches import Circle
+    plans = out_dir / "trees_plan.geojson"     # the cut crown outlines (world frame)
+    if n_trees and plans.exists():
+        from shapely.affinity import translate
         x0, y0 = region.bbox[0], region.bbox[1]
-        crowns = [Circle((t["x"] - x0, t["y"] - y0), t["r"]) for t in trees]
-        ax.add_collection(PatchCollection(crowns, facecolor="#3a9a3a", alpha=0.55,
+        crowns = [translate(_shape(f["geometry"]), -x0, -y0)
+                  for f in json.loads(plans.read_text(encoding="utf-8-sig"))["features"]]
+        ax.add_collection(PatchCollection(_patches(crowns), facecolor="#3a9a3a", alpha=0.55,
                                           edgecolor="#1f5f1f", linewidth=0.3))
     if framed_bbox is not None:   # "extend": show the box the user framed
         from matplotlib.patches import Rectangle
@@ -120,7 +143,7 @@ def _overview_png(out_dir: Path, name: str, region, lam_p: float, n_bld: int,
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     lon, lat = region.center_lonlat
-    tree_txt = f", {len(trees)} trees" if trees else ""
+    tree_txt = f", {n_trees} trees" if n_trees else ""
     ax.set_title(f"{name} — {region.xlen:g} x {region.ylen:g} m, {n_bld} buildings{tree_txt}, "
                  f"lambda_p = {lam_p:.3f}\ncentre {lat:.5f}, {lon:.5f} ({region.crs})",
                  fontsize=9)
@@ -138,12 +161,13 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         raise ConfigError('config needs "corners": [[lon, lat], [lon, lat]] — two '
                           "opposite corners copied from openstreetmap.org")
     name = site.get("name", config_file.stem)
+    expnr = _expnr(site)                      # checked before any download
     tools = site.get("udales_tools")
     udales_tools = resolve_udales_tools(
         (config_file.parent / tools).resolve() if tools else None)   # fail before fetching
 
     region = make_region(site["corners"], crs=site.get("crs", "auto"),
-                         snap_m=float(site.get("snap_m", 1.0)))
+                         snap_m=_num(site, "snap_m", 1.0))
 
     out_dir = site.get("output_dir")
     out_dir = (Path(out_dir) if out_dir and Path(out_dir).is_absolute()
@@ -191,7 +215,7 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
             "simply be unmapped (look at it on openstreetmap.org).")
 
     # --- buildings crossing the domain edge (see edges.py) -------------------
-    dx = float(site.get("dx", 2.0))
+    dx = _num(site, "dx", 2.0)
     bcfg = dict(DEFAULTS)
     bcfg.update(site.get("buildings", {}))
     edge_mode = site.get("edge_buildings", "clip")
@@ -205,8 +229,8 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         clearance = dx if clearance is None else float(clearance)
         kept, new_bbox, edge_report = apply_edge_policy(
             gj["features"], region, edge_mode, clearance,
-            float(site.get("edge_max_extend_m", 50.0)), float(site.get("snap_m", 1.0)),
-            float(bcfg["min_area"]), float(site.get("edge_min_inside", 0.5)))
+            _num(site, "edge_max_extend_m", 50.0), _num(site, "snap_m", 1.0),
+            float(bcfg["min_area"]), _num(site, "edge_min_inside", 0.5))
         region = region_from_bbox(region.crs, new_bbox, region.raw_bbox)
         if bcfg["fill_gaps"] and 2 * clearance < float(bcfg["gap_fill_width_dx"]) * dx:
             print(f"[edges] NOTE: edge_clearance_m {clearance:g} m leaves gaps across the "
@@ -215,6 +239,7 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         footprints_path = out_dir / "buildings_domain.geojson"
         footprints_path.write_text(json.dumps({**{k: v for k, v in gj.items() if k != "features"},
                                                "features": kept}), encoding="utf-8")
+    grew = any(edge_report.get("growth_m", {}).values())   # "extend" may not need to grow
 
     # --- domain corner onto the snap grid (region.on_lattice) --------------
     from .region import on_lattice
@@ -229,17 +254,21 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         from .canopy import SiteRaster
         from .surface import get_ndsm
         site_r = SiteRaster(region.crs, *region.bbox, res=1.0)
-        got = get_ndsm(bcfg, site_r, out_dir, config_file.parent)
-        if got is not None:
-            bcfg["_ndsm"] = (got[0], site_r.transform)
-            height_prov = got[1]
+        ndsm, prov = get_ndsm(bcfg, site_r, out_dir, config_file.parent)
+        failed = "; ".join(prov.get("lidar_failures", []))
+        if ndsm is not None:
+            bcfg["_ndsm"] = (ndsm, site_r.transform)
+            height_prov = prov
         elif hsrc == "lidar":
             raise ConfigError(
-                'height_source "lidar": no LiDAR for this site. Automatic download covers '
-                'England, Netherlands, Flanders/Brussels and France; elsewhere set '
-                '"dsm_file" + "dtm_file" (or "las_dir").')
+                'height_source "lidar": no LiDAR for this site' + (f" ({failed})" if failed else
+                ". Automatic download covers England, Netherlands, Flanders/Brussels and "
+                'France; elsewhere set "dsm_file" + "dtm_file" (or "las_dir")') + ".")
         else:
-            print("[heights] no automatic LiDAR for this site -> OSM heights")
+            # recorded, so a failed download is not mistaken for a deliberate OSM run
+            height_prov = {"source": "osm", **prov}
+            print(f"[heights] WARNING: LiDAR download failed ({failed}) -> OSM heights"
+                  if failed else "[heights] no automatic LiDAR for this site -> OSM heights")
     elif bcfg.get("las_dir"):
         height_prov = {"source": "las_dir"}
 
@@ -257,6 +286,10 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
                  name=name, crs=region.crs, bbox=region.bbox, grid=grid,
                  udales_tools=udales_tools)
 
+    # from here on the site folder gets new geometry files: an earlier run's
+    # report must not survive a failure and pass for this run's
+    (out_dir / "site.report.json").unlink(missing_ok=True)
+
     from .buildings import build_buildings
     result = build_buildings(cfg)
 
@@ -265,31 +298,28 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
     lam_p = 1.0 - result["ground_expected_m2"] / (region.xlen * region.ylen)
 
     # --- uDALES case files ------------------------------------------------
-    expnr = str(site.get("expnr", "001"))
-    expnr = expnr.zfill(3) if expnr.isdigit() else expnr   # solver opens *.<i3.3>
     udales_dir = out_dir / "udales"
     udales_dir.mkdir(exist_ok=True)
     shutil.copy2(out_dir / "buildings.stl", udales_dir / f"geom.{expnr}.stl")
 
     # --- vegetation (optional) ----------------------------------------------
-    from .vegetation import is_enabled
-    veg, trees = None, None
+    from .vegetation import _remove_veg_files, is_enabled
+    veg = None
     vcfg = site.get("vegetation")
+    # an earlier run's tree files must not stay next to the new geometry:
+    # only a vegetation run that finishes writes them again
+    n_old = _remove_veg_files(udales_dir, expnr, out_dir)
     if is_enabled(vcfg):
-        from .trees import read_trees_geojson
         from .vegetation import build_vegetation
         veg = build_vegetation(vcfg, region, grid, out_dir, config_file.parent,
                                udales_dir, expnr, cfg.udales_tools,
                                redo=redo_trees or force_fetch)
-        tp = out_dir / "trees.geojson"
-        if (veg or {}).get("provenance", {}).get("source") == "file":
-            tp = Path(veg["provenance"]["file"])      # source "file" writes no trees.geojson
-        trees = read_trees_geojson(tp, 0.0) if tp.exists() and veg.get("n_trees") else None
-    else:
-        _remove_stale_veg(udales_dir, expnr)
+    elif n_old:
+        print(f"[build] vegetation is off: removed {n_old} old vegetation file(s)")
 
-    _overview_png(out_dir, name, region, lam_p, result["n_buildings"], trees,
-                  framed_bbox if edge_report.get("growth_m") else None)
+    _overview_png(out_dir, name, region, lam_p, result["n_buildings"],
+                  (veg or {}).get("n_trees", 0),
+                  framed_bbox if grew else None)
 
     report = {
         "name": name,
@@ -307,11 +337,7 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         "gap_fill": result["gap_fill"],
         "grid_fit": result["grid_fit"],
         "lambda_p": round(lam_p, 4),
-        "grid": {"dx": dx, "dz": grid.zsize / grid.ktot, "itot": grid.itot,
-                 "jtot": grid.jtot, "ktot": grid.ktot, "xlen": grid.xlen,
-                 "ylen": grid.ylen, "zsize": grid.zsize,
-                 "note": "vegetation cells were computed on this grid; set dz/zsize "
-                         "in the config to match your case"},
+        "grid": _grid_report(grid),
         "expnr": expnr,
         "udales_dir": str(udales_dir),
         "vegetation": veg,
@@ -321,7 +347,7 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
 
     print(f"\n=== {name}: DONE ===")
     grown = (f", grown from {edge_report['framed_size'][0]:g} x {edge_report['framed_size'][1]:g}"
-             " to keep edge buildings whole" if edge_report.get("growth_m") else "")
+             " to keep edge buildings whole" if grew else "")
     print(f"  domain    : {region.xlen:g} x {region.ylen:g} m ({region.crs}{grown}), "
           f"edge buildings: {edge_mode}")
     print(f"  buildings : {result['n_buildings']} meshed / {n_fetched} fetched "
@@ -345,13 +371,14 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
     print(f"  STL       : {result['output_stl']}  "
           f"({'VALID' if result['valid'] else 'INVALID'}, {result['n_faces']} faces, "
           f"smallest {result['min_face_area_m2']:.1e} m2)")
-    if veg and veg.get("n_trees"):
+    if veg and veg.get("voxelize"):
         chk = veg.get("udprep_check") or {}
         print(f"  trees     : {veg['n_trees']} ({veg['provenance']['source']}) -> "
               f"{veg['voxelize']['cells']} veg cells"
               + (f", udprep check {'OK' if chk.get('consistent') else 'MISMATCH'}"
                  if chk else ""))
     print(f"  grid      : itot x jtot x ktot = {grid.itot} x {grid.jtot} x {grid.ktot} "
-          f"@ dx {dx:g} m, zsize {grid.zsize:g} m")
+          f"@ dx {grid.dx:g} m, dy {grid.dy:g} m, xlen x ylen {grid.xlen:g} x {grid.ylen:g} m, "
+          f"zsize {grid.zsize:g} m")
     print(f"  uDALES    : {udales_dir}")
     return report

@@ -6,7 +6,11 @@ Semantics (fixed, documented, no surprises):
     from the Export tab's bbox numbers.
   - They are projected into a metric CRS (auto = the UTM zone of their
     midpoint; or an explicit EPSG code like "EPSG:27700"), and the
-    axis-aligned bounding box IN PROJECTED METRES is the domain.
+    axis-aligned bounding box of the two PROJECTED points is the domain.
+    The map grid is turned slightly against the projected axes (grid
+    convergence), so the other diagonal of the same lon/lat rectangle gives
+    a box a few metres different; give the same two corners to repeat a
+    domain.
   - The box is then snapped OUTWARD (never inward — never cuts a framed
     building) to multiples of `snap_m`, anchored at the box centre, giving
     xlen/ylen that divide cleanly by the target grid spacing.
@@ -48,7 +52,8 @@ def auto_utm(lon: float, lat: float) -> str:
 
 
 def make_region(corners, crs: str = "auto", snap_m: float = 1.0) -> Region:
-    """corners = [[lon, lat], [lon, lat]] (any diagonal pair, any order)."""
+    """corners = [[lon, lat], [lon, lat]] (two opposite corners, any order; the
+    domain is the box of these two projected points, see the module notes)."""
     from .common import ConfigError
     (lon1, lat1), (lon2, lat2) = corners
     for lon, lat in ((lon1, lat1), (lon2, lat2)):
@@ -57,9 +62,15 @@ def make_region(corners, crs: str = "auto", snap_m: float = 1.0) -> Region:
                 f"corner ({lon}, {lat}) is not a WGS84 lon/lat pair — "
                 "corners are [longitude, latitude]; did you paste them "
                 "lat-first from the OSM URL?")
-    if abs(lat1) > abs(lon1) and abs(lat2) > abs(lon2) and \
-            max(abs(lat1), abs(lat2)) > 60 and max(abs(lon1), abs(lon2)) < 60:
-        print("[region] WARNING: corners look latitude-first — expected [lon, lat]")
+    if abs(lon1 - lon2) > 180.0:
+        # the midpoint of 179.99 and -179.99 is 0 (the wrong UTM zone), and the
+        # OSM and canopy downloads ask for a lon/lat box around the whole globe
+        raise ConfigError("the corners lie on both sides of the 180th meridian: such sites "
+                          "are not supported")
+    if max(abs(lat1), abs(lat2)) > 60 and max(abs(lon1), abs(lon2)) < 60:
+        # a swapped pair often has |"lat"| > 60; correct sites up north too
+        print("[region] NOTE: a corner is above 60 degrees latitude; if the centre "
+              "printed below is not your site, the corners are latitude-first")
 
     mid_lon, mid_lat = (lon1 + lon2) / 2.0, (lat1 + lat2) / 2.0
     print(f"[region] interpreting corners as [lon, lat]: centre = "

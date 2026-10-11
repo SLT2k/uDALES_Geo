@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -89,7 +90,13 @@ class SiteRaster:
         return {"type": "Polygon", "coordinates": [[list(p) for p in ring]]}
 
 
-def _warp_into(dst: np.ndarray, site: SiteRaster, src, resampling="bilinear") -> bool:
+# plausible values [m]: elevations and heights in general, and canopy heights
+VALID_M = (-500.0, 9000.0)
+VALID_CANOPY_M = (-150.0, 150.0)       # no tree is 150 m tall
+
+
+def _warp_into(dst: np.ndarray, site: SiteRaster, src, resampling="bilinear",
+               valid=VALID_M) -> bool:
     """Reproject the part of an open rasterio dataset that overlaps the site
     into dst (combined with fmax, so several tiles can be poured in).
     Only the needed window is read. Returns False if there is no overlap."""
@@ -105,6 +112,10 @@ def _warp_into(dst: np.ndarray, site: SiteRaster, src, resampling="bilinear") ->
     if win is None or win.width <= 0 or win.height <= 0:
         return False
     arr = src.read(1, window=win, masked=True).astype(np.float32).filled(np.nan)
+    # every caller reads metres: a value outside `valid` is an undeclared
+    # no-data value (-9999, 32767, 3.4e38, 255 in a uint8 canopy map, ...),
+    # removed before resampling blends it into its neighbours
+    arr[~((arr > valid[0]) & (arr < valid[1]))] = np.nan
     tmp = site.empty()
     reproject(arr, tmp, src_transform=src.window_transform(win), src_crs=src.crs,
               src_nodata=np.nan, dst_transform=site.transform, dst_crs=site.crs,
@@ -149,7 +160,7 @@ def chm_from_file(path: str | Path, site: SiteRaster):
     import rasterio
     chm = site.empty()
     with rasterio.open(path) as src:
-        if not _warp_into(chm, site, src):
+        if not _warp_into(chm, site, src, valid=VALID_CANOPY_M):
             raise ValueError(f"chm_file {path} does not overlap the site")
     return chm, {"source": "chm_file", "file": str(path)}
 
@@ -172,6 +183,7 @@ def chm_from_las(las_files, dtm_file, site: SiteRaster,
     from rasterio.warp import transform_bounds
 
     veg = site.empty(-np.inf).ravel()
+    seen = np.zeros(veg.size, dtype=bool)      # cells holding a return of any class
     n_used = 0
     tiles = []
     for f in las_files:
@@ -184,12 +196,8 @@ def chm_from_las(las_files, dtm_file, site: SiteRaster,
             bx0, by0, bx1, by1 = transform_bounds(site.crs, crs, *site.bounds, densify_pts=21)
             n_file = 0
             for chunk in rd.chunk_iterator(2_000_000):
-                m = np.isin(np.asarray(chunk.classification), veg_classes)
-                if not m.any():
-                    continue
-                x = np.asarray(chunk.x)[m]
-                y = np.asarray(chunk.y)[m]
-                z = np.asarray(chunk.z)[m]
+                x = np.asarray(chunk.x)
+                y = np.asarray(chunk.y)
                 inb = (x >= bx0) & (x <= bx1) & (y >= by0) & (y <= by1)
                 if not inb.any():
                     continue
@@ -197,20 +205,27 @@ def chm_from_las(las_files, dtm_file, site: SiteRaster,
                 col = np.floor((np.asarray(X) - site.xmin) / site.res).astype(np.int64)
                 row = np.floor((site.ymax - np.asarray(Y)) / site.res).astype(np.int64)
                 ok = (col >= 0) & (col < site.width) & (row >= 0) & (row < site.height)
-                np.maximum.at(veg, row[ok] * site.width + col[ok], z[inb][ok])
-                n_file += int(ok.sum())
+                cell = row[ok] * site.width + col[ok]
+                seen[cell] = True
+                m = np.isin(np.asarray(chunk.classification)[inb][ok], veg_classes)
+                np.maximum.at(veg, cell[m], np.asarray(chunk.z)[inb][ok][m])
+                n_file += int(m.sum())
             n_used += n_file
             tiles.append({"file": str(f), "crs": str(crs), "veg_points_in_site": n_file})
     if n_used == 0:
         return None
     veg = veg.reshape(site.height, site.width)
-    veg[~np.isfinite(veg)] = np.nan
+    seen = seen.reshape(site.height, site.width)
 
     dtm = site.empty()
     with rasterio.open(dtm_file) as src:
         if not _warp_into(dtm, site, src):
             raise ValueError(f"dtm_file {dtm_file} does not overlap the site")
-    chm = veg - dtm
+    # a cell the point cloud and the DTM cover has data: canopy height there, or
+    # 0 if no vegetation return fell in it; a cell either misses is no-data
+    # (so coverage_of_site measures the data, not the share of cells with trees)
+    has_data = seen & np.isfinite(dtm)
+    chm = np.where(has_data, np.where(np.isfinite(veg), veg - dtm, 0.0), np.nan).astype(np.float32)
     return chm, {"source": "las", "tiles": tiles, "dtm_file": str(dtm_file),
                  "veg_classes": list(veg_classes), "veg_points_used": n_used}
 
@@ -218,7 +233,8 @@ def chm_from_las(las_files, dtm_file, site: SiteRaster,
 # --------------------------------------------------------------------------
 # lidar-3: automatic England download (EA LIDAR Vegetation Object Model)
 # --------------------------------------------------------------------------
-def fetch_ea(product: str, site: SiteRaster, cache_dir: Path, year=None, label: str = "EA"):
+def fetch_ea(product: str, site: SiteRaster, cache_dir: Path, year=None, label: str = "EA",
+             valid=VALID_M):
     """Download the 1 m England Environment Agency tiles of `product` covering
     the site (latest year per 5 km tile unless `year` is given), warped onto
     the site grid. Returns (array, tiles) or None outside England (no tiles).
@@ -252,22 +268,29 @@ def fetch_ea(product: str, site: SiteRaster, cache_dir: Path, year=None, label: 
     tiles = []
     for r in picks:
         zp = cache_dir / f"{r['label']}.zip"
+        if zp.exists() and not zipfile.is_zipfile(zp):
+            zp.unlink()                      # an error page cached by an earlier run
         if not zp.exists():
             print(f"[{label}] downloading {r['label']} ...")
             _http_get(r["uri"], out=zp, timeout=300)
-        names = [n for n in zipfile.ZipFile(zp).namelist()
-                 if n.lower().endswith(".tif") and "_HS_" not in n.upper()]  # HS = hillshade image
+            if not zipfile.is_zipfile(zp):
+                zp.unlink()
+                raise RuntimeError(f"{r['uri']} did not return a zip file (service error?); "
+                                   "rerun later")
+        with zipfile.ZipFile(zp) as z:
+            names = [n for n in z.namelist()
+                     if n.lower().endswith(".tif") and "_HS_" not in n.upper()]  # HS = hillshade
         if not names:
             raise RuntimeError(f"{zp.name}: no GeoTIFF inside")
         with rasterio.open(f"/vsizip/{zp.as_posix()}/{names[0]}") as src:
-            _warp_into(arr, site, src)
+            _warp_into(arr, site, src, valid=valid)
         tiles.append({"tile": r["tile"]["label"], "year": r["year"]["id"],
                       "file": names[0], "uri": r["uri"]})
     return (arr, tiles) if tiles else None
 
 
 def fetch_ea_vom(site: SiteRaster, cache_dir: Path, year=None):
-    got = fetch_ea(EA_VOM_PRODUCT, site, cache_dir, year, label="canopy")
+    got = fetch_ea(EA_VOM_PRODUCT, site, cache_dir, year, label="canopy", valid=VALID_CANOPY_M)
     if got is None:
         return None
     chm, tiles = got
@@ -303,10 +326,14 @@ def fetch_meta_chm(site: SiteRaster):
         for q in keys:
             try:
                 with rasterio.open("/vsicurl/" + META_BASE + q + ".tif") as src:
-                    if _warp_into(chm, site, src):
+                    if _warp_into(chm, site, src, valid=VALID_CANOPY_M):
                         used.append(q)
             except Exception as e:
-                print(f"[canopy] Meta CHM tile {q} unavailable: {e}")
+                if not re.search(r"(?<!\d)404(?!\d)", str(e)):
+                    # a failed download would silently become "no trees" here
+                    raise RuntimeError(f"Meta CHM tile {q} could not be read ({e}); "
+                                       "rerun later") from e
+                print(f"[canopy] Meta CHM tile {q} does not exist (open sea?): skipped")
     if not used:
         return None
     return chm, {"source": "meta_chm_v2", "quadkeys": used, "licence": META_LICENCE,
@@ -328,19 +355,29 @@ def get_chm(vcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path,
     cache = site_dir / "chm.tif"
     prov_path = site_dir / "canopy.provenance.json"
     domain = [round(v, 3) for v in site.bounds]
-    if cache.exists() and prov_path.exists() and not force:
-        prov = json.loads(prov_path.read_text(encoding="utf-8"))
-        same = prov.get("domain_bbox") is not None and all(
-            abs(a - b) <= 0.011 for a, b in zip(prov["domain_bbox"], domain))   # on_lattice move
-        if same and prov.get("chm_res_m") == site.res:
-            print(f"[canopy] reusing {cache.name} (--redo-trees to rebuild)")
-            with rasterio.open(cache) as src:
-                return src.read(1).astype(np.float32), prov
-        print("[canopy] domain or resolution changed since chm.tif was made -> rebuilding it")
 
     def p(v):
         v = Path(v)
         return v if v.is_absolute() else (base_dir / v).resolve()
+
+    # what the CHM was made from: another source or other input files must
+    # not reuse it
+    request = {"source": vcfg["source"],
+               "chm_file": str(p(vcfg["chm_file"])) if vcfg.get("chm_file") else None,
+               "las_files": [str(p(f)) for f in vcfg.get("las_files") or []],
+               "dtm_file": str(p(vcfg["dtm_file"])) if vcfg.get("dtm_file") else None,
+               "las_crs": vcfg.get("las_crs"), "veg_classes": list(vcfg.get("veg_classes") or []),
+               "ea_year": vcfg.get("ea_year")}
+    if cache.exists() and prov_path.exists() and not force:
+        prov = json.loads(prov_path.read_text(encoding="utf-8"))
+        same = prov.get("domain_bbox") is not None and all(
+            abs(a - b) <= 0.011 for a, b in zip(prov["domain_bbox"], domain))   # on_lattice move
+        if same and prov.get("chm_res_m") == site.res and prov.get("request") == request:
+            print(f"[canopy] reusing {cache.name} (--redo-trees to rebuild)")
+            with rasterio.open(cache) as src:
+                return src.read(1).astype(np.float32), prov
+        print("[canopy] domain, resolution or canopy source changed since chm.tif was made "
+              "-> rebuilding it")
 
     source = vcfg["source"]
     out = None
@@ -372,11 +409,14 @@ def get_chm(vcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path,
         raise RuntimeError(f"no canopy data could be obtained (source '{source}')")
 
     chm, prov = out
+    # no tree is 150 m tall: larger heights (either sign) are no-data values
+    # that survived, e.g. a +9999 DTM hole in the LAS route
+    chm[~((chm > VALID_CANOPY_M[0]) & (chm < VALID_CANOPY_M[1]))] = np.nan
     coverage = float(np.isfinite(chm).mean())
     chm = np.nan_to_num(chm, nan=0.0)
     np.clip(chm, 0.0, None, out=chm)
     prov.update({"coverage_of_site": round(coverage, 4), "chm_res_m": site.res,
-                 "domain_bbox": domain,
+                 "domain_bbox": domain, "request": request,
                  "crs": site.crs,
                  "fetched_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
     if coverage < 0.95:

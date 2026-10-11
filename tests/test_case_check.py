@@ -50,3 +50,15 @@ def test_non_periodic_boundary_counts_as_open():
     solid[-1, 5:10, :] = True
     assert narrow_cavities(solid, periodic=(True, True))[0] > 0
     assert narrow_cavities(solid, periodic=(False, True))[0] == 0
+
+
+def test_solid_mask_from_another_grid_is_unusable_input(tmp_path):
+    # namoptions changed after udprep ran: exit code 2, not a crash or a pass
+    from udales_geo.case_check import main
+    case = tmp_path / "007"
+    case.mkdir()
+    (case / "namoptions.007").write_text("&DOMAIN\nitot = 8\njtot = 8\nktot = 4\n/\n")
+    (case / "solid_c.txt").write_text("# i j k\n   1    1    9\n")
+    assert main([str(case)]) == 2
+    (case / "solid_c.txt").write_text("# i j k\n   1    1    1\n")
+    assert main([str(case)]) == 0

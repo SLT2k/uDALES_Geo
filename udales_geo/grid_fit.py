@@ -14,8 +14,8 @@ with case_check.py (level_components): on each vertical level, label the
 fluid cells (4-connected, joined across the periodic domain edges); every
 component except the one holding most fluid cells is ENCLOSED; an enclosed
 component without a full 3 x 3 block of fluid cells is NARROW. A cell centre
-counts as solid when it is inside a building or within udprep's tolerance
-(IBM_TOL) of its surface. Narrow enclosed courtyards are filled; open slots
+counts as solid when it is inside a building, on its outline, or at most
+udprep's tolerance (IBM_TOL) above its roof. Narrow enclosed courtyards are filled; open slots
 are left alone (#367 needed code-side damping for those, not more filling)
 and only counted.
 
@@ -55,9 +55,12 @@ from shapely.strtree import STRtree
 from .case_check import level_components
 from .gaps import _area, _polygons
 
-# udprep's ibmtol: a cell centre within this distance of a surface counts as
-# SOLID (in_mypoly_functions.f90: the t < tol branch returns inside). So a
-# centre at exactly roof height is solid, and so is one on an outline.
+# udprep's ibmtol in the vertical ray test (in_mypoly_functions.f90: the
+# t < tol branch returns inside): a cell centre up to this far above a roof
+# counts as SOLID, and so does one at exactly roof height. Sideways there is
+# no such band: a centre exactly ON a wall counts as solid (exact
+# coincidence, which the 1 cm snap lattice makes possible), one 0.1 mm
+# outside does not.
 IBM_TOL = 5e-4
 
 
@@ -116,12 +119,14 @@ def narrow_enclosed(H, dz, min_cells=3, periodic=(True, True)):
     return found, census
 
 
-def fill_courtyards(fph, bbox, dx, dy, dz, ni, nj, snap, min_cells=3):
+def fill_courtyards(fph, bbox, dx, dy, dz, ni, nj, snap, min_cells=3, inset=0.02):
     """fph: [(Polygon, height, props)] in world coordinates, buildings and gap
     fills, non-overlapping. Returns (fills, stats); fills =
     [(Polygon, height, {"courtyard_fill": True})] (may overlap lower buildings
-    inside the courtyard: absorb_into_fills afterwards)."""
+    inside the courtyard: absorb_into_fills afterwards). inset: fills stay this
+    far inside the domain edge, like the footprints (boundary_inset)."""
     x0, y0, x1, y1 = bbox
+    inner = box(x0 + inset, y0 + inset, x1 - inset, y1 - inset)
     polys = [p for p, _, _ in fph]
     heights = np.array([h for _, h, _ in fph], dtype=float)
     H = cell_centre_heights(fph, x0, y0, dx, dy, ni, nj, snap)
@@ -166,7 +171,10 @@ def fill_courtyards(fph, bbox, dx, dy, dz, ni, nj, snap, min_cells=3):
                 squares = shapely.union_all(shapely.box(
                     x0 + ii * dx - e, y0 + jj * dy - e,
                     x0 + (ii + 1) * dx + e, y0 + (jj + 1) * dy + e))
-                region = _area(shapely.intersection(squares, open_k, grid_size=snap))
+                # (open_k includes the padding ring outside the domain: the
+                # squares of edge cells must not reach into it)
+                region = _area(shapely.intersection(shapely.intersection(squares, inner),
+                                                    open_k, grid_size=snap))
                 reach = max(dx, dy)
                 n_cells += 1
             else:
