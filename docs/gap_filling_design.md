@@ -155,10 +155,8 @@ The §7 questions were not answered; the recommended defaults were taken.
   piece classification, the fill properties `neighbours` / `height_donor` /
   `width_est` (the sidecar flags only `gap_fill` / `courtyard_fill` /
   `plug`, AGENTS.md §4.4), the stale-case-file reminder.
-- Limitation (code review 2026-10-11): a wedge between two walls meeting at
-  more than about 23° is regrown exactly by the mitre opening (shapely's
-  mitre_limit 5), so its narrow tip is not filled and `remaining_narrow_m2`
-  does not see it.
+- Wedge tips, found unfilled in the code review of 2026-10-11: filled since
+  the same day, see §10.
 
 Measured (dx = 2 m, W = dx unless noted). "No-air walls" = wall area whose
 cell is solid and has no fluid neighbour (4 sides + above), a proxy for the
@@ -175,3 +173,105 @@ The remainder is sub-cell detail (inner facade corners, facade jogs, roof
 steps between neighbours of nearly equal height), plus in Paris the 2–4 m
 light-wells that only W = 2 dx fills. Remaining open ground narrower than W
 after filling: ≤ 0.03 m² on every site.
+
+## 10. Wedge tips, tip heights, pockets and thin parts (2026-10-11)
+
+A diagnosis with udprep's own rules (a re-implementation of
+`matchFacetsToCells` that reproduces udprep's logged "Total area missing
+flux" to 4 decimals and also counts the wall pieces udprep drops without a
+message) found where the walls without a facet section were after §9:
+
+- **Wedge tips.** The mitre opening (shapely's mitre_limit 5) regrows a
+  V-shaped gap between walls meeting at more than about 23° exactly, so its
+  tip, which holds no grid point near its apex, was never filled. These tips caused all of
+  the example's logged u, w and c loss, and with one 12° V-slot (filled by
+  the mitre only up to about 0.96 m width at that angle) almost all of
+  Earl's Court's.
+- **Thin fills.** Fills a few mm wide (bridges across corner pinches, spikes,
+  layered fins) are solids with walls but no solid grid point behind them
+  ("phantom" walls: 38 m² at the example's (369, 140)).
+
+What `gaps.py` does now (details: its docstring and AGENTS.md stage 10):
+
+1. Wedge tips are found where an opening regrown with mitre_limit 2 differs
+   from the normal one (corners sharper than 60°; 90° corners stay exact)
+   and filled up to where a disc of diameter W touches both walls (the
+   convex hull of the round-opening residue at that corner). A residue part
+   whose hull shrinks after `set_precision(1e-6)` carried a zero-width
+   numerical spike; the hulls of the cleaned parts are used instead (random
+   wedges: up to 160 m² of hull where the tip is 2 m²). At most 4 rounds,
+   each on what the rounds before left open. Tips reaching the inset line at
+   the domain edge are skipped (edges count as open ground).
+2. Tips are not claimed by the level-by-level height rule (the mitre opening
+   regrows them at every level); each gets the lower height of the two
+   buildings sharing the longest boundary with it, measured on
+   floating-precision copies of the footprints.
+2a. Pockets (ground found narrow in rounds 2-4, between two tips or between
+   a tip and a low building) are claimed level by level with this piece's
+   own fills as walls: a pocket closed by a 3.3 m kiosk gets 3.3 m, not the
+   10 m of the tip beside it. A small court with sharp corners can be filled
+   whole although a W-disc fits in it (in-circle up to about 2.3 m in tests).
+2b. Tips found in rounds 2-4 ("late tips") are claimed with the pockets, but
+   the claim cannot give a tip its height (the opening regrows it at every
+   level). A pocket fill more than half inside a late tip then takes the tip
+   height (its claimed height where the rule would give the lowest
+   neighbouring height), with this piece's other fills counting as walls
+   when fewer than two buildings line it, other late tips and slivers
+   excepted: a late tip is lined partly by earlier fills, and between a
+   building and a lower fill it exists only up to the fill. The whole pocket
+   fill takes the tip height, so up to half of it that is not tip moves with
+   it.
+2c. A sliver under 2 snap steps wide claimed lower than a fill of the same
+   piece it lines (along a quarter of its outline) takes that fill's height
+   (a 2 m² crack otherwise).
+2d. A left-over counts a building only along 5 snap steps of contact (a
+   quarter of a small part's outline), and one building only if it lines a
+   quarter of the outline; otherwise this piece's fills count as walls too,
+   and without a second wall it gets the lowest neighbouring height. A
+   near-degenerate opening after the tip subtraction is snapped to the grid
+   before the overlay that would raise.
+3. With `grid=(dx, dy)` (as `build_buildings` calls it), a narrow part that
+   touches walls along less than 25 % of its perimeter and covers no c, u or
+   v grid point is not filled.
+4. A mitre opening that GEOS returns as overlapping parts (invalid; it
+   stopped the build with a TopologyException in 1 of 200 random layouts) is
+   repaired as the union of its parts.
+
+Chosen among about twenty variants with an evaluation harness on all five
+sites, the stress test and random wedges; checked by an adversarial suite of
+32 layouts, by real udprep runs and by four independent reviews whose
+breakers added 600 random and 558 family layouts, then 3600 fresh ones and
+1720 more (points 2a-2d and the precision copies come from those reviews; on
+the random set they halved the fill area that is not narrow at its own
+height and left fewer cracks through the whole chain than the code before:
+26 layouts against 31 and 4 of 1 m² or more against 5 on the random set, 8
+against 15 on the families; the late-tip rule of point 2b raises that fill
+area again). The rules of points 2b and 2d were checked on 3040 layouts that
+no choice used (except the fourth review's order rule): total no-flux 150 m²
+below the version of the second review and 2435 m² below the first version
+(AGENTS.md §7.1, also for the large cracks from noding that remain). Measured (no-flux wall area = udprep's
+logged plus silent pieces, summed over the u, v, w and c grids; real udprep
+logged numbers per grid in AGENTS.md §5.3):
+
+| site | no-flux before → after [m²] | phantom walls before → after [m²] | all fills before → after [m²] |
+|---|---|---|---|
+| example (Manhattan) | 265.6 → 147.0 | 41.7 → 0.9 | 1923.0 → 1945.1 |
+| Earl's Court, gaps filled | 177.3 → 2.6 | 1.5 → 0.5 | 1491.6 → 1583.8 |
+| Earl's Court, gaps open | 5164.8 → 5128.9 | 0.5 → 0.5 | 1268.4 → 1290.9 |
+| South Kensington twins | 0 → 0 | 0 → 0 | 367.2 → 374.1 |
+
+No site got a new no-flux spot; cracks, narrow columns after filling (0)
+and the stress test (2 and 2 layouts with cracks, at most 0.27 m²) are
+unchanged. Random wedges (200 plain, 399 with a kiosk next to the tip): no
+plain layout got worse (total no-flux 3899.7 → 1197.8 m²); with a kiosk
+three did: a tip fill that joins an unseen kiosk to a building (+305 m², the
+kiosk is then kept), a tip fill next to a lower fill that leaves a sub-W
+pocket above it (+8.4 m²), and one with a new 0.19 m² hair crack (+0.6 m²).
+They are listed in AGENTS.md §7.1, with what stays open: tips at the domain
+edge, wedges whose apex is cut off by a short end wall, the thin OSM
+building parts (64.3 m² on the example's c grid) and attached thin fills.
+The tip holds no grid point only near its apex: whole tip fills often cover
+grid points, and in adversarial layouts (tips near the domain edge, tips in
+closed courts later filled higher, tips among kiosks) that sometimes costs
+flux the code before did not lose: 22 of 557 family layouts are worse by
+more than 1 m², while the total falls 3.6 % (AGENTS.md §7.1).

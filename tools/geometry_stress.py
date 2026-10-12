@@ -13,10 +13,11 @@ final noding, plugs, then the mesher, and counts per layout:
   overlap - footprints/fills overlapping (meshed tallest-first; harmless)
   err     - exceptions
 2026-10-05 (after the code review): after 0, cracks 2 of 150 (max 0.27 m2),
-overlap ~25 of 150, err 0, for seeds 11 and 23. About 6 s per 150 layouts,
-single process. Written for the code review of 2026-10 (it found the plug,
-noding and per-level-claim bugs); run it after changing gaps.py, grid_fit.py,
-region.py or city_surface.py.
+overlap ~25 of 150, err 0, for seeds 11 and 23. 2026-10-11 (wedge tips):
+after 0, cracks 2 and 2 (max 0.096 and 0.268 m2), overlap 34 and 23, err 0.
+About 7 s per 150 layouts, single process. Written for the code review of
+2026-10 (it found the plug, noding and per-level-claim bugs); run it after
+changing gaps.py, grid_fit.py, region.py or city_surface.py.
 """
 import contextlib
 import io
@@ -72,14 +73,14 @@ def chain(fph, x0, y0):
     bbox = (x0, y0, x0 + 60, y0 + 60)
     with contextlib.redirect_stdout(io.StringIO()):
         fph = resolve_footprint_overlaps(fph, snap=SNAP)
-    fills, _ = fill_gaps(fph, bbox, DX, 0.02, SNAP)
+    fills, _ = fill_gaps(fph, bbox, DX, 0.02, SNAP, grid=(DX, DX))
     fph, _ = thread_through_fills(fph, fills, SNAP)
     fph = fph + fills
     yards, _ = fill_courtyards(fph, bbox, DX, DX, DZ, N, N, SNAP, inset=0.02)
     if yards:
         fph = absorb_into_fills(fph, yards, SNAP)
         fph, _ = thread_through_fills(fph, yards, SNAP)
-        more, _ = fill_gaps(fph, bbox, DX, 0.02, SNAP)
+        more, _ = fill_gaps(fph, bbox, DX, 0.02, SNAP, grid=(DX, DX))
         fph, _ = thread_through_fills(fph, more, SNAP)
         fph = fph + more
     fph, _ = drop_unseen_groups(fph, x0, y0, DX, DX, N, N, DZ, SNAP)

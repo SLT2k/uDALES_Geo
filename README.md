@@ -101,8 +101,8 @@ flowchart TD
    buildings. So the tool fills gaps narrower than one cell (their walls would
    get no heat or momentum exchange), fills courtyards the grid would see as
    enclosed shafts too narrow to be stable (uDALES issue #367), and drops
-   buildings no cell centre falls in. Fills go up to the lowest neighbouring
-   roof around them.
+   buildings no cell centre falls in. Fills go up to the lowest roof of the
+   buildings that enclose them.
 6. **Mesh** — one connected surface of roofs, walls and ground.
 7. **Checks** — uDALES' `udgeom` checks the saved STL; the run also stops on
    faces small enough to crash an energy-balance run and (with gap filling

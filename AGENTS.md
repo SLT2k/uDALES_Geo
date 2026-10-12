@@ -76,7 +76,7 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `case_check.py` | standalone, after udprep: #367 check on `solid_c.txt` (periodic per `BCxm`/`BCym`), unused facets, missing-flux lines from the case's logs; also holds `periodic_labels` and `level_components`, which `grid_fit.py` imports |
 | `facet_types.py` | standalone backend, not wired in: ground/roof/wall per STL triangle and the types file udprep reads |
 
-### Tests `tests/` (offline: no network, no uDALES clone; 127 cases)
+### Tests `tests/` (offline: no network, no uDALES clone; 169 cases)
 
 | file | covers |
 |---|---|
@@ -86,6 +86,7 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `test_config.py` | null = default, `expnr` 0–999, error line numbers after block comments, corner order, antimeridian, the vegetation switch, grid spacing when xlen is not a multiple of dx |
 | `test_rasters.py` | DTM hole filling; request boxes on each source's pixel grid; request URLs per service kind |
 | `test_gaps.py` | gap filling widths, heights, notches, domain edge, snap grid; mesher micro-face regression; per-piece opening; per-level sliver claim and noding that never swaps corners (both meshed and checked with `_hair_cracks`) |
+| `test_gaps_tips.py` | wedge tips (filled up to where a W-disc touches both walls; 60-90 deg corners not), tip height (lower of the two walls, not the lowest building nearby; a corner touch does not count; a short contact counts if it is a quarter of the outline; a sliver touching a building at one end takes no height from it; a part lined by a short building contact and a fill takes a fill height, by one short contact only the lowest neighbouring height; with the footprints' 1 cm precision model), pockets (between two tips, with the tip fills as walls; closed by a low kiosk; one that no level claims takes the lowest neighbouring height; a thin pocket part is not claimed where it hangs free), tips found in a later round (take the tip height; lined by a building and a lower fill, the fill's height; lined by two buildings, no height from fills; no heights from each other; a pocket fill less than half in one keeps its claim), slivers next to a taller tip (not raised to a speck, to a fill under 2 cm wide, on a touch at one end or on a touch under 5 snap steps), thin parts (with and without a grid point, a c point only, at an upper level, attached to claimed fills as a left-over or at its level, not counted as remaining), tip hull overreach (three random wedges, a rotated wedge, a pinch), a tip at the domain edge left open, overlapping mitre spikes and a near-degenerate opening that crashed the build |
 | `test_grid_fit.py` | courtyard detection and filling (outline and cell routes, heights, sheds, towers, roof-height solid rule, wide courtyard behind an unresolved slit), unseen buildings, plugs only where enclosed and without cracks, separate dy, `on_lattice` rounding like GEOS |
 | `test_case_check.py` | cavity detection on synthetic IBM masks: x and y seams, wrap-padded block test, non-periodic boundaries; a `solid_c.txt` from another grid is exit code 2 |
 | `test_facet_types.py` | classes per triangle, the types file format and its line order (line n = triangle n) |
@@ -108,7 +109,8 @@ The four `compare_*` sites are in London (LiDAR heights, EA canopy map).
 `gap_filling_design.md` (why sub-grid gaps break uDALES, with uDALES source
 references; §9 is the as-built state of 2026-09-28; later changes —
 per-piece opening, threading and the per-level claim — are in stage 10 here,
-final noding in stage 11f), `vegetation_design.md`,
+final noding in stage 11f; §10 is the wedge-tip fix of 2026-10-11: tips,
+tip heights, pockets, thin parts), `vegetation_design.md`,
 `building_height_sources.md` (LiDAR services by country, endpoints, probes,
 candidate downloaders), `PROGRESS.md` (status).
 
@@ -171,7 +173,7 @@ the folder's existence is checked, not that `udgeom` imports.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-127 test cases (about 2 s), no network and no uDALES clone. The network sources
+169 test cases (about 2 s), no network and no uDALES clone. The network sources
 (Overpass, LiDAR services, EA VOM, Meta CHM), `udgeom` and the udprep
 cross-check are exercised only by building real sites (§5.2).
 
@@ -252,7 +254,7 @@ flowchart TD
     LID --> FP["7 Footprints into the domain<br/>clip 2 cm inside the edge, drop parts under min_area"]
     FP --> HGT["8 One height per footprint<br/>LiDAR, else OSM, else default_height"]
     HGT --> CLN["9 Clean-up<br/>heights to 0.1 m, overlaps cut tallest first"]
-    CLN --> GAP["10 Sub-grid gap filling, fill_gaps<br/>opening per piece, layered heights, threading<br/>gap_fills.geojson"]
+    CLN --> GAP["10 Sub-grid gap filling, fill_gaps<br/>opening per piece, wedge tips, layered heights, threading<br/>gap_fills.geojson"]
     GAP --> FIT["11 Grid fit<br/>narrow enclosed courtyards, second gap pass,<br/>unseen buildings, final noding, plugs, census<br/>courtyard_fills.geojson"]
     FIT --> MESH["12 Meshing<br/>snap-rounded partition, CDT, wall quads"]
     MESH --> CHK{"13 Checks<br/>udgeom chain, face-area gate, hair-crack gate"}
@@ -541,7 +543,7 @@ Output: non-overlapping footprints on the world lattice.
 
 ### Stage 10. Sub-grid gap filling
 
-`buildings.py: build_buildings`, `gaps.py: fill_gaps, _narrow_parts, thread_through_fills, remaining_narrow_area`. Background: [docs/gap_filling_design.md](docs/gap_filling_design.md).
+`buildings.py: build_buildings`, `gaps.py: fill_gaps, _narrow_parts, _wedge_tips, thread_through_fills, remaining_narrow_area`. Background: [docs/gap_filling_design.md](docs/gap_filling_design.md).
 
 uDALES sees buildings only through grid points inside the STL. A gap narrower
 than dx may hold none; the walls facing it lie in solid cells, udprep drops
@@ -549,10 +551,11 @@ their facet sections, and they exchange no heat or momentum (every case, not
 only energy-balance runs: the default `iwallmom = 2` reads the same sections).
 Runs when `fill_gaps` [true]. W = `gap_fill_width_dx` [1.0] × dx, with dx =
 xlen / itot. Signatures (`fph` = `[(Polygon, height, props)]`, world frame):
-`fill_gaps(fph, bbox, width, inset, snap)` → `(fills, stats)`;
+`fill_gaps(fph, bbox, width, inset, snap, grid=None)` → `(fills, stats)`;
 `thread_through_fills(fph, fills, snap)` and `node_together(fph, snap)` →
 `(fph, number of outlines changed)`; `remaining_narrow_area(fph, bbox,
-width, snap)` → m².
+width, snap, grid=None, inset=0.0)` → m². `build_buildings` passes
+`grid=(dx, dy)` to both and its `inset` to `remaining_narrow_area`.
 
 1. Buildings are unioned on the lattice. Open ground = the domain box grown by
    W (square corners; domain edges count as open ground) minus the buildings.
@@ -563,10 +566,57 @@ width, snap)` → m².
    blunt street corner (spikes reach up to about 5 r) could cover a small
    separate pit, which then counted as wide and was never filled (1 m² pits at
    Earl's Court; regression test with a blunted wedge in `test_gaps.py`).
-3. The narrow parts are clipped to the domain box shrunk by `boundary_inset`.
+   GEOS can grow several shrunk parts back into a MultiPolygon whose parts
+   overlap; the next overlay then raised a TopologyException and stopped the
+   build (1 of 200 random layouts with a kiosk next to a wedge, also before
+   2026-10-11). `_valid` repairs such a result as the union of its parts
+   (`make_valid`, method "structure"; the default "linework" would drop the
+   overlaps and make them look narrow).
+3. **Wedge tips** (2026-10-11; `_wedge_tips`, `_narrow_piece`). A V-shaped
+   gap between walls meeting at more than about 23° is regrown exactly by
+   the mitre opening (mitre_limit 5), so step 2 alone never fills its tip.
+   Near the apex the tip holds no grid point; such tips caused most of the
+   flux loss udprep's rules give on the example sites (§5.3). The whole
+   filled tip often covers grid points further out (about half of the tip
+   fills on the example and at Earl's Court, §7.1). Where an opening
+   regrown with `mitre_limit` `TIP_MITRE_LIMIT` = 2 differs from the normal
+   one, the corner is sharper than 60° and is a wedge tip (90° corners stay
+   exact). The tip is filled up to where a disc of diameter W touches both
+   walls: the convex hull of the round-opening residue at that corner (a
+   triangle for a straight wedge). A residue part can carry a zero-width
+   numerical spike along a wall whose hull covers most of the wedge (random
+   wedges: up to 160 m² where the tip is 2 m²); if `set_precision(1e-6)`
+   of the part shrinks its hull, the hulls of the cleaned parts are used.
+   Subtracting the hulls can leave a valid but near-degenerate opening that
+   the 1 cm overlay rejects with a TopologyException (1 in about 3000 random
+   layouts; the code before had no such step); the opening is then snapped to
+   the grid first. Steps 2-3 run at most 4 rounds, each on what the rounds
+   before left open:
+   two tips filled from opposite ends of a gap can leave a sub-W pocket, and
+   a round can uncover narrow ground that a mitre spike hid in the round
+   before (with `gap_fill_width_dx` 2 that changes the result even apart
+   from tips: 11 m² more on the example; round 3 rarely finds anything, but
+   then it can be several m², 8.3 m² in one family layout; round 4 is a
+   margin). Parts found in rounds 2-4 are "pockets", and the wedge tips
+   among them "late tips" (step 6). A tip that is not more than one snap step inside the
+   `boundary_inset` line is skipped: domain edges count as open ground, and
+   filling it puts a new wall on the seam (in the test layout 19 m² more
+   no-flux wall on the v grid, 68 m² less on the w and c grids).
+   Limitation: a wedge whose apex is cut off by a short end wall wider than
+   2r tan(a/2)(1/sin(a/2) − 2) (a = the wedge angle: 1.0 m at 30°, 0.5 m at
+   45°, 0.17 m at 55°) has no bevelled corner, so it is not filled and
+   `remaining_narrow_area` does not see it (neither did the code before).
+4. **Thin parts** (only with `grid`). A narrow part touching walls along
+   less than `MIN_ATTACH` = 25 % of its perimeter (a bridge across a corner
+   pinch, a spike, a layered fin) that covers no c, u or v grid point (plan
+   positions x0 + i dx/2, y0 + j dy/2 with i or j odd) is not filled: as a
+   hair-thin solid it has walls but no solid grid point behind them
+   ("phantom" walls: 38 m² at the example's (369, 140) before 2026-10-11).
+   A part covering a grid point is always filled.
+5. The narrow parts are clipped to the domain box shrunk by `boundary_inset`.
    A strip between a building and the domain edge is never filled; buildings
    touching exactly (party walls) have no gap.
-4. Height of each piece ("layered"): if the buildings within W of it all have
+6. Height of each piece ("layered"): if the buildings within W of it all have
    one height, that height. Otherwise level by level from the tallest: at
    level z only buildings ≥ z tall count as walls; in a window of the piece
    grown by 1.5 W, open_z = window − walls, and the piece claims at height z
@@ -576,10 +626,76 @@ width, snap)` → m².
    closes by snap rounding (a sub-cm sliver open in the all-building union but
    solid at level z); claiming only the narrow parts of open_z left them for a
    much lower level and a crack above (code review 2026-10, regression test
-   in `test_gaps.py`). Leftovers get the lowest neighbouring height. A slit
-   between a 20 m and a 10 m building is filled to 10 m; a notch in one
-   building gets its height.
-5. **Threading** (`thread_through_fills`): every fill corner within
+   in `test_gaps.py`). With `grid`, the thin-part rule also applies to each
+   claimed part (its attachment counted against the walls at level z plus
+   the parts already claimed). A slit between a 20 m and a 10 m building is
+   filled to 10 m; a notch in one building gets its height.
+   **Tip height**: the mitre opening regrows tips at every level, so tips
+   are what is left after the claim. Each gets the lower height of the two
+   buildings sharing the longest boundary with it: a wedge exists only up to
+   its lower wall. A building counts if it touches the part along at least 5
+   snap steps (or a quarter of the outline of a part smaller than that); one
+   building is enough for a notch if it lines at least `MIN_ATTACH` of the
+   outline. A part with no such contact gets the lowest neighbouring height.
+   If one building lines it along less than `MIN_ATTACH` (a sliver touching a
+   building at one end only), this piece's fills count as walls too, and
+   without a second wall it also gets the lowest neighbouring height: as a
+   "notch" of the building it touched, a 16 cm² sliver became an 18.9 m fin
+   in a random layout; with the lowest neighbouring height for every such
+   part, a 0.48 m² part lined by a 28.1 m building (24 % of its outline) and
+   a 24.1 m fill fell to the 6.0 m of a building it does not touch (88 m²
+   more walls without a facet section; third review, 2026-10-12). Claiming
+   tips level by level instead put part of a tip above the
+   lower roof, a fin whose walls get no facet section (regression test in
+   `test_gaps_tips.py`). Contacts are measured on floating-precision copies
+   (`_float`): the footprints carry the 1 cm precision model of
+   `resolve_footprint_overlaps`, GEOS snapped a 1 cm buffer of a slanted wall
+   to that grid, and a tip got the taller wall's height (15.5 m too high in
+   a random layout).
+   **Pockets** (parts found in rounds 2-4) are taken out before the claim
+   and claimed afterwards in the same level-by-level way, with this piece's
+   own fills as walls at their heights; what is narrow at no level gets the
+   lowest neighbouring height. A pocket closed by a 3.3 m kiosk gets 3.3 m,
+   not the 10 m of the tip next to it: one left-over part used to take the
+   tip's height and put 7.4 m² of solid up to 6.7 m above the kiosk (review
+   2026-10-11). A small court with sharp corners can be filled whole this
+   way, although a W-disc fits in it (§7.1).
+   **Late tips** (wedge tips found in rounds 2-4) are claimed with the
+   pockets, but the plain opening of the claim regrows a tip at every level,
+   so the claim can leave one far below its walls: a tip beside a 23.0 m
+   building fell to the 16.4 m of a building it does not touch, and one
+   lined by a 19.0 m building was claimed at 11.8 m beside a 0.5 m² hair
+   crack. A pocket fill more than half inside a late tip therefore takes the
+   tip height after the claim (the rule above, with the claimed height as
+   the fallback), and this piece's other fills count as walls when fewer
+   than two buildings line it: a late tip is lined partly by fills found
+   before it, and between a building and a lower fill it exists only up to
+   the fill. Other late tips do not count as walls: their claimed heights
+   are what is being corrected, and reading them made the result depend on
+   the order of the fills (a small tip was left below every wall it touched;
+   fourth review). Nor do slivers, whose height the sliver rule below may
+   still change. The whole pocket fill takes the tip height, so the part
+   that is not tip (up to half) moves with it, almost always up: about
+   23 m² in 6640 fresh layouts, by up to 21 m (0.4 m² of one fill raised
+   from 3.9 to 24.8 m). The version of the second review took
+   late tips out of the pockets and gave them a building's full height: in
+   fresh courtyard layouts that put up to 697 m² more walls without a facet
+   section into one court (third review, 2026-10-12). Splitting a pocket
+   fill along the tip outline, taking late tips out of the pockets, or
+   raising every pocket fill that touches a late tip was tried and was not
+   better (a pocket strip cut off beside a tip was dropped as a thin part
+   and left a slit; raising every touching fill saves 184 m² of no-flux over
+   about 8200 test layouts but puts 48 m² of fill above the level where it
+   is narrow).
+   **Slivers**: a fill less than 2 snap steps wide that the claim put lower
+   than a fill of the same piece it lines takes that fill's height; "lines"
+   means that fill is at least 2 snap steps wide and shares at least 5 snap
+   steps of edge and a quarter of the sliver's outline with it. A
+   snap-rounding sliver of a tip, claimed at a lower roof, left a 2 m² hair
+   crack beside the tip in a random layout: enough to stop the build. Raised
+   on a touch at one end, a sliver became an 18–29 m fin (56 m² of phantom
+   walls), hence the share.
+7. **Threading** (`thread_through_fills`): every fill corner within
    `SNAP_TOL` × snap (0.999 × 1 cm) of a building edge is inserted into that
    edge (GEOS snap), so building and fill share the vertex. A fill corner is a
    rounded intersection point and can land up to about 1 cm off the edge;
@@ -589,9 +705,12 @@ width, snap)` → m².
    apart in floating point: at a full step it swapped neighbouring corners and
    opened cracks; below it, it can only insert. A result is kept only if it is
    a valid Polygon. Count: `gap_fill.buildings_threaded`.
-6. Fills join the footprint list with props `{"gap_fill": true}`.
-7. `remaining_narrow_area`: open ground still narrower than W after filling
-   (self-check, about 0; 0.03 m² at Earl's Court). Nothing gates on it.
+8. Fills join the footprint list with props `{"gap_fill": true}`.
+9. `remaining_narrow_area`: open ground still narrower than W after filling,
+   by the same rules (wedge tips included; thin parts and edge tips that are
+   skipped do not count). A self-check, about 0 (0.0 m² on the four sites
+   with gap filling on; 0.03 m² at Earl's Court before 2026-10-11). Nothing
+   gates on it.
 
 Written: `gap_fills.geojson` (world frame with the legacy `crs` member, so
 QGIS places it; properties `height` and `kind` `"gap"`; the fills as made
@@ -731,7 +850,7 @@ grid-independent footprint area threshold (`min_area`, no default;
 `SNAP_TOL` × snap (0.999 cm) of a neighbour's edge is inserted into that edge,
 in both directions (building into fill, fill into building, fill into fill);
 just under one step so that a lattice vertex is never moved onto a
-neighbour's vertex 1 cm away (stage 10, step 5). A result is kept only if
+neighbour's vertex 1 cm away (stage 10, step 7). A result is kept only if
 it is a valid Polygon. Count: `outlines_noded`. Found necessary at Earl's
 Court: a 6 mm × 2.2 m sliver between a courtyard fill and a building that
 threading alone did not close.
@@ -759,17 +878,18 @@ fluid in real udprep, a one-cell enclosed column.
 (not an error). `n_buildings` in the reports counts footprints without the
 `gap_fill`, `courtyard_fill` or `plug` flag.
 
-Measured (dx = dz = 2 m, final builds of 2026-10-05): South Kensington
-(`compare_heights_lidar`; the example until 2026-10-11) 43 narrow enclosed
-columns before → 0 after (9 courtyard fills, 174.1 m²; 91 narrow components,
-summed over levels, filled by outline and 17 by cells; 1 second-pass gap
-fill, 0.2 m²; 2 outlines noded; no plug); the Manhattan example (2026-10-11)
-258 → 0 (50 fills, 961.9 m²; 286 by outline, 104 by cells; 34 second-pass
-fills, 55.4 m²; 8 noded; 1 plug); Earl's
-Court with gaps filled 228 → 0 (65 courtyard fills, 846.5 m²; 253 by outline,
-147 by cells; 53 second-pass gap fills, 61.7 m²; 1 unseen building dropped;
-11 outlines noded; 1 plug). `open_narrow_cells` after (cell-levels): 2572
-(South Kensington), 10383 (Earl's Court).
+Measured (dx = dz = 2 m, builds of 2026-10-11 after the wedge-tip fix):
+South Kensington (`compare_heights_lidar`) 40 narrow enclosed columns before
+→ 0 after (8 courtyard fills, 165.1 m²; 91 narrow components, summed over
+levels, filled by outline and none by cells; no second-pass gap fill; 2
+outlines noded; no plug); the Manhattan example 246 → 0 (48 fills, 939.6
+m²; 289 by outline, 84 by cells; 21 second-pass fills, 40.3 m²; 8 noded; no
+plug); Earl's Court with gaps filled 220 → 0 (61 courtyard fills, 829.0 m²;
+260 by outline, 120 by cells; 54 second-pass gap fills, 64.3 m²; 1 unseen
+building dropped; 11 outlines noded; 1 plug). `open_narrow_cells` after
+(cell-levels): 2572 (South Kensington), 10257 (Earl's Court). Before the fix
+(2026-10-05 builds) South Kensington had 43 columns before filling and
+Earl's Court 228.
 
 ### Stage 12. Meshing
 
@@ -857,9 +977,10 @@ The chain as it runs:
    triangle (|normal z| < 1e-6), the point 1 cm in front of its centroid
    must be air: if the surface there is higher than the centroid, the wall
    faces solid again across a crack narrower than 1 cm, lies in solid cells
-   and gets no flux in uDALES. Slits of 1–3 cm pass unseen (§7.1); a 5 cm
-   probe was tried on 2026-10-11 and not adopted (it flagged 10–12 of 150
-   stress layouts, 3 of 300 above 1 m²). With `fill_gaps` on, a total crack wall area of
+   and gets no flux in uDALES. A 5 cm probe was tried on 2026-10-11 and not
+   adopted: it flagged 10–12 of 150 stress layouts (3 of 300 above 1 m²), and
+   what it found on the built sites were not slits but short corner walls and
+   wedge tips (§7.1). With `fill_gaps` on, a total crack wall area of
    `HAIR_CRACK_MAX_M2` = 1.0 m² or more makes the mesh invalid (that size
    means a systematic tool bug: the 2026-10 lattice offset gave 35–160 m²);
    less is a WARNING (the mesher's own snapping leaves cm-wide crevices, at
@@ -1215,8 +1336,8 @@ mesher's lattice. With the lattices offset, some never closed: full-height
 slivers between gap fills and buildings, whose walls sit in solid cells and
 get almost no heat exchange. In real udprep the c-grid missing flux was
 32.4 m² in South Kensington (0.00 m² with the final code) and 20.0 m² at
-Earl's Court (14.4 m² final; the rest is on open narrow slots and sub-cell
-facade details, §5.3). Putting the corner on the lattice alone took an Earl's
+Earl's Court (14.4 m² in the builds of 2026-10-05, mostly in wedge tips and
+one V-slot; 0.034 m² after the wedge-tip fix of 2026-10-11, §5.3). Putting the corner on the lattice alone took an Earl's
 Court sub-site's crack missing flux from 7.2 to 0 m².
 
 The defence has four layers; keep all of them:
@@ -1271,9 +1392,10 @@ Rules that follow:
 
 - Footprints and fills should not overlap. Overlaps are removed by
   `resolve_footprint_overlaps` (stage 9) and `absorb_into_fills` (stage 11);
-  gap fills are built from open ground. Residual overlaps of up to about
-  0.006 m² remain from rounding in overlap resolution, gap filling and
-  noding; each partition face takes the height of the tallest footprint
+  gap fills are built from open ground. Small residual overlaps remain from
+  rounding in overlap resolution, gap filling and noding (in the stress
+  test's random layouts up to 0.08 m² per layout, before and after the
+  2026-10-11 wedge-tip fix); each partition face takes the height of the tallest footprint
   holding its representative point (`city_surface.height_of`), so they mesh
   like a tallest-wins resolution and are harmless. Do not go back to "first
   hit wins": that gave such spots arbitrary heights.
@@ -1402,25 +1524,25 @@ Downloads are cached, so reruns need no network. In each
 - `hair_crack_walls` 0 with `fill_gaps` on (a `hair_crack_area_m2` under
   1 m² is only a warning; none of the five sites has one).
 - `min_face_area_m2` ≥ 5e-5 (the lattice minimum; the gate is 1e-6).
-  Reference: 1.5e-3 to 1.8e-3 m² in South Kensington, 5.0e-5 m² at Earl's
-  Court; `faces_below_1e-4_m2` 0 in South Kensington, 9 at both Earl's Court
-  sites.
+  Reference: 3.0e-4 m² for the two South Kensington comparison sites, 5.0e-5
+  m² at Earl's Court and on the Manhattan example; `faces_below_1e-4_m2` 0
+  for South Kensington, 9 at both Earl's Court sites, 3 on the example.
 - `grid_fit.after.narrow_columns` 0; `grid_fit.dropped_unseen` plausible
   (small sheds only).
 - `gap_fill.remaining_narrow_m2` about 0; `ground_missing_pct` about 0.
 
-Reference values (final builds of 2026-10-05, after the code-review fixes;
-`example` moved to Manhattan on 2026-10-11, its old row is kept as the
-South Kensington reference):
+Reference values (builds of 2026-10-12 with the final wedge-tip fix; the South
+Kensington row is the example as it was built on 2026-10-05, kept as a
+reference):
 
 | site | valid | buildings | faces | smallest face m² | hair cracks | gap fills (pieces, m²) | narrow columns before → after | courtyard fills (n, m²) | second-pass gap fills (n, m²) | dropped | plugs |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| example (Manhattan, 2026-10-11) | yes | 340 | 14340 | 5.0e-5 | 0 | 145, 905.7 | 258 → 0 | 50, 961.9 | 34, 55.4 | 0 | 1 |
-| example until 2026-10-11 (South Kensington) | yes | 204 | 11244 | 1.5e-3 | 0 | 33, 192.9 | 43 → 0 | 9, 174.1 | 1, 0.2 | 0 | 0 |
-| compare_heights_osm | yes | 205 | 10714 | 1.8e-3 | 0 | 33, 192.9 | 43 → 0 | 9, 174.1 | 1, 0.2 | 0 | 0 |
-| compare_heights_lidar | yes | 203 | 11228 | 1.5e-3 | 0 | 33, 192.9 | 43 → 0 | 9, 174.1 | 1, 0.2 | 0 | 0 |
-| compare_gaps_filled | yes | 521 | 26908 | 5.0e-5 | 0 | 136, 583.4 | 228 → 0 | 65, 846.5 | 53, 61.7 | 1 | 1 |
-| compare_gaps_open | yes | 521 | 27928 | 5.0e-5 | 4 walls, 48.4 m² (warning; the original OSM slits) | off | 297 → 0 | 121, 995.6 | 194, 272.7 | 1 | 1 |
+| example (Manhattan) | yes | 340 | 14240 | 5.0e-5 | 0 | 149, 965.2 | 246 → 0 | 48, 939.6 | 21, 40.3 | 0 | 0 |
+| example until 2026-10-11 (South Kensington, 2026-10-05) | yes | 204 | 11244 | 1.5e-3 | 0 | 33, 192.9 | 43 → 0 | 9, 174.1 | 1, 0.2 | 0 | 0 |
+| compare_heights_osm | yes | 205 | 10722 | 3.0e-4 | 0 | 35, 208.9 | 40 → 0 | 8, 165.1 | 0, 0 | 0 | 0 |
+| compare_heights_lidar | yes | 203 | 11238 | 3.0e-4 | 0 | 35, 208.9 | 40 → 0 | 8, 165.1 | 0, 0 | 0 | 0 |
+| compare_gaps_filled | yes | 521 | 26952 | 5.0e-5 | 0 | 139, 690.5 | 220 → 0 | 61, 829.0 | 54, 64.3 | 1 | 1 |
+| compare_gaps_open | yes | 521 | 27954 | 5.0e-5 | 4 walls, 48.4 m² (warning; the original OSM slits) | off | 297 → 0 | 121, 995.6 | 208, 295.3 | 1 | 1 |
 
 Open `gap_fills.geojson` and `courtyard_fills.geojson` in QGIS over
 `buildings_domain.geojson` (QGIS reads their `crs` member; colour by `kind`)
@@ -1492,10 +1614,12 @@ Cases: `cases_full/` (401 = South Kensington STL from before 2026-09-28;
 402–404 = the 2026-09-29 STLs), `cases_full2/` (412–414) and `cases_full3/`
 (512–514): earlier 2026-10-05 runs, superseded; `cases_final/` (612 = the
 South Kensington example as it was until 2026-10-11, 613 =
-compare_gaps_filled, 614 = compare_gaps_open: the final STLs of 2026-10-05,
-613/614 byte-identical to the sites' `udales/geom.*.stl`); `cases_final_leb/` (301
+compare_gaps_filled, 614 = compare_gaps_open: the STLs of 2026-10-05, which
+were byte-identical to the sites' `udales/geom.*.stl` until the rebuild after
+the wedge-tip fix of 2026-10-11; the current Earl's Court STL is case 201
+below); `cases_final_leb/` (301
 South Kensington, 206 × 200 m; 302 Earl's Court, 200 × 200 m: sub-sites built
-with the final code, full lEB preprocessing). Grid of each case = the `grid`
+with the code of 2026-10-05, full lEB preprocessing). Grid of each case = the `grid`
 block of the site's `site.report.json`. Run one case at a time (§2.6).
 
 Results (full sites, IBM only, dx = 2 m), 2026-09-29 STLs (402–404) → final
@@ -1509,12 +1633,36 @@ STLs (612–614), checked with `case_check`:
 
 (The non-periodic scratch census `solid_census.py` counted 298 columns for
 the gaps-open STL.) The earlier 2026-10-05 runs had 8 (413) and 2 (513)
-unused facets with gaps filled, 27 (414) and 21 (514) with gaps open. The missing flux left at Earl's
-Court (gaps filled) sits on walls of open narrow slots (not enclosed; not
-filled by design) and sub-cell facade details. The gaps-open variant keeps
-OSM's sub-grid slits on purpose; its 16 unused facets were not analysed.
+unused facets with gaps filled, 27 (414) and 21 (514) with gaps open. The
+missing flux left at Earl's Court (gaps filled) sat in wedge tips and one
+12° V-slot at (150, 83) (diagnosis of 2026-10-11); the wedge-tip fix below
+removes nearly all of it. The gaps-open variant keeps OSM's sub-grid slits
+on purpose; its 16 unused facets were not analysed.
 
-Energy-balance check with the final code (`cases_final_leb/`, full lEB
+Wedge-tip fix (2026-10-11), IBM only, cases made with the repository
+scripts from the rebuilt sites. Before = commit 43f5bc8 (example case 001
+from `sites/example`; Earl's Court case 613 above, the same STL). The
+numbers were the same for the first version of the fix and for the final one
+after both review rounds; most of what is left at Earl's Court is the u-grid
+1.89 m² at an acute building corner at (225.3, 529.8):
+
+| site | missing flux u / v / w / c [m²] before → after | narrow cavities | `facets_unused` |
+|---|---|---|---|
+| example (Manhattan) | 7.88 / 0.013 / 1.84 / 2.92 → 0 / 0.013 / 0 / 0 | 0 → 0 | 0 → 0 |
+| Earl's Court, gaps filled | 7.66 / 14.37 / 15.39 / 14.40 → 1.89 / 0 / 0.061 / 0.034 | 0 → 0 | 0 → 0 |
+
+The 0.013 m² on the example's v grid is a 1 cm wall stub next to a gap fill
+at (292.6, 149.4). udprep logs only wall pieces in cells with a fluid
+neighbour; it drops the pieces in cells that are neither fluid nor
+solid boundary cells without a message. A re-implementation of
+`matchFacetsToCells` that reproduces the logged numbers to 4 decimals and
+also counts those silent pieces (summed over u, v, w and c) gives: example
+265.6 → 147.0 m², Earl's Court gaps filled 177.3 → 2.6, gaps open 5164.8 →
+5128.9, the South Kensington twins 0 → 0, with no new no-flux spot on any
+site. Of the example's remainder, 65.5 m² on the c grid, 64.3 m² is the thin
+OSM building parts of §7.1.
+
+Energy-balance check with the code of 2026-10-05 (`cases_final_leb/`, full lEB
 preprocessing: IBM, View3D, shortwave): runs clean, no View3D closure repair,
 svf without NaN, 0 narrow cavities, 0 unused facets; c-grid missing flux
 15.4 m² at 301 (one open facade alcove; depends on grid alignment) and 0 m² at
@@ -1562,7 +1710,9 @@ cracks (with the largest crack wall area), overlaps between outlines and
 exceptions; exit code 1 if any layout has narrow columns left or fails.
 Result with the final code, seeds 11 and 23 x 150 layouts: hair cracks in
 2 and 2 layouts (131 of 150 before the review fixes), at most 0.27 m2, none
-next to a plug; 0 narrow columns after filling in all. Worth running after changes to
+next to a plug; 0 narrow columns after filling in all. Unchanged by the
+2026-10-11 wedge-tip fix (0.096 and 0.268 m²; overlapping outlines in 34 and
+23 layouts, 27 and 22 before, the largest 0.08 m² both before and after). Worth running after changes to
 `gaps.py`, `grid_fit.py` or the mesher (single-process; see §2.6).
 
 ---
@@ -1708,10 +1858,13 @@ Do not just drop a hand-made file into `sites/<name>/` as
   grid (ground triangles up to about 313 m²). Not addressed.
 - **View3D is not periodic**: facets near the domain edge see too much sky.
 - **Open narrow slots** (connected to the street, < 3 cells wide) are counted
-  (`open_narrow_cells`, cell-levels: 2572 South Kensington, 10383 Earl's
+  (`open_narrow_cells`, cell-levels: 2572 South Kensington, 10257 Earl's
   Court) but not filled; #367's remedy for those is solver-side damping that
-  is not in uDALES master. They hold most of the remaining missing flux at
-  Earl's Court (14.4 m² on the c-grid).
+  is not in uDALES master. The missing flux left at Earl's Court (gaps
+  filled) is 1.89 / 0 / 0.061 / 0.034 m² on the u / v / w / c grids, mostly
+  at an acute building corner at (225.3, 529.8) (§5.3); it used to be
+  ascribed to these slots, but the diagnosis of 2026-10-11 found it in wedge
+  tips and one V-slot.
 - **Grid fit assumes periodic x and y**: `narrow_enclosed` does not read the
   case's boundary conditions. In an inflow/outflow case a narrow pocket open
   only to the domain boundary counts as enclosed and is filled (by its
@@ -1721,21 +1874,126 @@ Do not just drop a hand-made file into `sites/<name>/` as
 - **Hair cracks under 1 m²** pass the build as a warning (stage 13). The
   stress test (§5.5) still finds them in 2 of 150 layouts per seed (at most
   0.27 m²).
-- **Slits of 1–3 cm** between solids pass the 1 cm hair-crack probe unseen;
-  a 5 cm probe finds 0.19 m² of such walls on the Manhattan example and
-  0.87 m² at Earl's Court (gaps filled). Their walls lie in solid cells. Not
-  adopted because it also flags 10–12 of 150 stress layouts (3 of 300 above
-  the 1 m² error threshold), code review 2026-10-11.
-- **Wedge gaps**: two walls meeting at an angle above about 23° enclose a
-  wedge whose tip is narrower than W; the mitre opening regrows it exactly,
-  so gap filling does not fill it and `remaining_narrow_m2` does not see it
-  (stage 10; gaps.py docstring).
-- **Hair-thin fills**: gap-fill pieces a few mm wide can survive as thin
-  solid slabs (the mirror image of a hair crack); no gate reports them. Their
-  walls lie in fluid cells on both sides and get no IBM sections.
-- **The Manhattan example has not been run through udprep IBM or
-  `case_check`** (only its vegetation cross-check loads the STL); the IBM
-  verification (§5.3) is for the London sites.
+- **What a 5 cm crack probe finds** (0.19 m² of walls on the Manhattan
+  example, 0.87 m² at Earl's Court with gaps filled, before 2026-10-11) is not
+  1–3 cm slits: the diagnosis of 2026-10-11 traced it to the probe point
+  landing across short walls at building corners and inside wedge tips.
+  Wedge tips are now filled (stage 10).
+- **Wedge tips left open**: a tip reaching the `boundary_inset` line (domain
+  edge) is skipped on purpose, corners of 60–90° are not tips (their sub-W
+  part lies within one cell of the corner), and a wedge whose apex is cut off
+  by a short end wall (wider than 1.0 m at 30°, 0.5 m at 45°, 0.17 m at 55°)
+  is not detected (stage 10, step 3). A V-slot sharper than about 23° is
+  filled by the mitre opening only up to a width that shrinks with its
+  angle (about 0.96 m for the 12° slot at Earl's Court (150, 83)); the tip
+  rule fills the rest (42.7 m² of no-flux wall there, summed over the u, v,
+  w and c grids, removed).
+- **Small courts with sharp corners can be filled whole** although a W-disc
+  fits in them (in-circle up to about 2.3 m in tests): the tip fills cut into
+  the disc and leave a pocket narrower than W (stage 10, step 6). A court
+  open to the street that holds one grid point loses it.
+- **Tip and pocket fills can cover grid points** (about half of the tip
+  fills on the example and at Earl's Court; harmless there). In adversarial
+  layouts this sometimes costs flux the code before did not lose: a tip
+  whose chord stops just short of the domain edge swallows the only fluid
+  point between the wedge and the edge; first-pass tip or pocket fills in a
+  closed court end up lower than the courtyard fill made later (the second
+  gap pass cannot raise them), leaving a layered sub-W gap; tips and pockets
+  among kiosks cover the points between them. Over 557 such layouts (eight
+  families: kiosks, three-tip courts, nested kiosks, domain edges, slivers,
+  clutter, courtyard holes, near-degenerate shapes; 558 were generated, and
+  the code before stops on one with a GEOS TopologyException) the total
+  no-flux wall through the whole chain falls 3.6 % against the code before
+  (173 433 → 167 117 m², summed over the u, v, w and c grids), cracks fall
+  from 15 to 8 layouts (from 5 to 4 of 1 m² or more), and 22 layouts are
+  worse by more than 1 m² (1350 m² in all; the courtyard-hole family is
+  1.0 % worse in total).
+- **Thin fills**: with the thin-part rule (stage 10, step 4) a free-standing
+  sliver that covers no grid point is no longer filled (phantom walls on the
+  example 41.7 → 0.9 m², evaluation harness). A thin fill attached to walls
+  along at least 25 % of
+  its perimeter is still made (it extends a wall); no gate reports thin
+  fills.
+- **A fill can rescue an unseen building** (rare): a gap or tip fill that
+  joins a building no grid cell centre falls in to a neighbour makes them one
+  group, so `drop_unseen_groups` keeps it and its walls get no facet section
+  (random wedges with a kiosk: 1 of 199 layouts, +305 m² of no-flux wall
+  summed over the four grids). Ordinary gap fills could do the same before
+  2026-10-11.
+- **Thin OSM building parts** up to about 1.8 m wide that hold no cell
+  centre keep walls without facet sections (Manhattan example: 64.3 m² on
+  the c grid, 53.1 m² of it at (483.6, 52.4)); they are not gaps and are
+  left as OSM maps them.
+- **A tip fill can close a layered pocket** (rare): a tip fill next to a
+  lower fill can leave a sub-W pocket above the lower fill, and a taller
+  wall in that pocket gets no facet section (random wedges with a kiosk: 1
+  of 199 layouts, 8.4 m² summed over the grids; none on the five sites).
+- **Rare small new cracks and phantom walls**: in 399 random wedge layouts
+  with a kiosk, one tip fill opened a hair crack of 0.19 m² (a warning, below
+  the 1 m² stop) and a few made phantom walls of up to 0.26 m²; raised
+  slivers (stage 10, step 6) add a few m² of phantom wall in other
+  adversarial layouts. Over 600 adversarial random layouts through the
+  whole chain the fix leaves fewer cracks than the code before (26 layouts
+  against 31; 4 of 1 m² or more against 5).
+- **Large cracks from noding** (found 2026-10-12, not fixed): a pass over
+  every one of 8360 fresh layouts (the random and family generators with
+  new seeds: 3600 used to choose the late-tip rules, 3040 held out, 1720
+  from the fourth review) finds layouts with a crack of 1 m² or more going
+  from 74 with the code before to 76; layouts with any crack fall from 302
+  to 223, and the code before stops with a GEOS error on 41 of them. Twelve
+  layouts get a crack of 1 m² or more that the code before does not have,
+  so their build stops: 294, 90, 20, 16, 15.5 and 3.7 m² in the held-out
+  set (294 m² is random layout s27_39), 24, 6.2, 4.0, 4.0 and 1.5 m² in the
+  set used to choose, and 42 m² in the fourth review's; the fix removes ten
+  such cracks of the code before in the same sets. They come from the
+  noding steps, not from the fill heights. In s27_39 a small fill's corner,
+  a lattice point 1 cm from a building's corner, lies 9.8 mm from that
+  building's 17.7 m long edge, just inside the 9.99 mm tolerance of
+  `thread_through_fills` (and of `node_together` after it), so it is
+  inserted into that edge and the whole edge swings by up to 9.8 mm. The
+  neighbour's wall along the same edge lay within 3.4 mm of it (both
+  outlines run between lattice points), close enough for the mesher's 1 cm
+  snap rounding to merge them; now it is up to 12.7 mm away, and the gap
+  along the 11.4 m shared wall is a 294 m² hair crack. Without that one
+  insertion there is no crack and 616 m² less no-flux. Elsewhere threading
+  leaves near misses open, or `node_together` leaves one. Ten date from the
+  first version of the tip fix. Two (20 and 1.5 m²) are in the first
+  review's version but not in the second review's: taking late tips back
+  into the pockets brought them back, and removed one of the second
+  review's own (2.3 m²). A cure to try: node the buildings with each other
+  before filling, so walls they share coincide and are segments of their
+  own; on five large-crack layouts that removed three of the cracks
+  (s27_39 included; not done, not validated).
+- **Late tips and short contacts, measured on fresh layouts** (third and
+  fourth reviews, 2026-10-12): the rules of stage 10, step 6 were chosen on
+  1558 adversarial layouts and then on 3600 fresh ones, and checked on 3040
+  more that no choice used (except the order rule of the fourth review,
+  compared on all sets; on the held-out ones it changes one layout by
+  2.4 m²). Against the version of the second review (the one installed
+  before), total no-flux falls by 150 m² on the held-out layouts (11 worse
+  by more than 1 m², 117 m² in all; 10 better, 268 m²) and
+  by 1901 m² on the 3600 (10 worse, 161 m²; 16 better, 2063 m², the
+  courtyard cases); the cracks this brings back are in the bullet above.
+  Against the version of the first review, over the 569 held-out layouts
+  where a version differs: 839 m² less, 5 worse (54 m²), 26 better, crack
+  layouts 27 → 25 (10 → 9 of 1 m² or more, counted on those layouts only).
+  Against the first version: 2435 m² less, 22 worse (307 m²), 67 better,
+  crack layouts 37 → 25 (17 → 9). Five held-out layouts are worse than both
+  of those versions, by at most 14 m² (one gets a 0.1 m² crack). Known
+  costs: a late tip touching two buildings takes the lower one even where a
+  fill lines it longer, and the second contact can be as short as 5 cm (or
+  less for a small part); with a pocket fill beside it that is less than
+  half in the tip and keeps its claim, this left a 0.7 m² hair crack over a
+  2.0 m fill in one fresh layout, and in one layout of the fourth review's
+  set it cost 35 m² of no-flux (measured before the order rule; over that
+  set the late rule saved 358 m² net). The thin-part check without
+  floating-precision copies (step 4) costs 125 m² of no-flux in one layout and saves 100 m² in another (over about 8200 layouts it changes 16, and in total costs 19 m² more than with the copies); the minimum contact (5 snap
+  steps, or a quarter of a small part's outline) costs more than 1 m² in 18 layouts (236 m² in all, at most 49 m²) and saves about 4000 m² in 35, net 3770 m²; a sliver width of
+  4 snap steps instead of 2 would save 117 m² of no-flux and add 49 m² of
+  phantom walls.
+- **The Manhattan example has been run through udprep IBM and `case_check`
+  only for the wedge-tip fix (§5.3, IBM only)**; no energy-balance
+  preprocessing.
 - **Crowns at a periodic seam** are clipped at the domain edge, not wrapped
   to the opposite side (stage 15d).
 - **Legacy `"extrude"` route** fails for a building standing inside another
@@ -1862,7 +2120,7 @@ Orchestration:
 - [docs/gap_filling_design.md](docs/gap_filling_design.md) — why sub-grid
   gaps break uDALES (with uDALES source line references), measurements, the
   algorithm, §9 as built on 2026-09-28 (later changes: stages 10 and 11f of
-  this file).
+  this file), §10 the wedge-tip fix of 2026-10-11.
 - [docs/vegetation_design.md](docs/vegetation_design.md) — vegetation module
   design and decisions.
 - [docs/building_height_sources.md](docs/building_height_sources.md) — LiDAR

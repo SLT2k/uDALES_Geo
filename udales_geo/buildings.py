@@ -36,10 +36,11 @@ MIN_FACE_AREA = 1e-6
 # size means a systematic bug: the 2026-10 lattice offset gave 35-160 m2);
 # smaller ones are reported as a warning (the mesher's own snapping leaves
 # cm-wide crevices, at most 0.27 m2 in 2 of 150 random layouts per seed of
-# tools/geometry_stress.py). Slits of 1-3 cm pass unseen (0.19 m2 of wall on
-# the Manhattan example, 0.87 m2 at Earl's Court). A 5 cm probe sees them but
-# also flags 10-12 of 150 stress layouts, 3 of 300 above 1 m2 (code review
-# 2026-10-11), so it was not adopted.
+# tools/geometry_stress.py). A 5 cm probe was not adopted: it flags 10-12 of
+# 150 stress layouts, 3 of 300 above 1 m2 (code review 2026-10-11), and the
+# 0.19 m2 (Manhattan example) and 0.87 m2 (Earl's Court) of wall it found on
+# the built sites were not slits but short walls at building corners and
+# wedge tips (diagnosis 2026-10-11; wedge tips are now filled, gaps.py).
 HAIR_CRACK_M = 0.01
 HAIR_CRACK_MAX_M2 = 1.0
 
@@ -302,12 +303,12 @@ def build_buildings(cfg: Config) -> dict:
     gap_stats = None
     fills_path = out_stl.parent / "gap_fills.geojson"
     if bcfg.get("fill_gaps", True):
-        fills, gap_stats = fill_gaps(fph, cfg.bbox, width, inset=inset, snap=snap)
+        fills, gap_stats = fill_gaps(fph, cfg.bbox, width, inset=inset, snap=snap, grid=(dx, dy))
         fph, gap_stats["buildings_threaded"] = thread_through_fills(fph, fills, snap)
         fph = fph + fills
         gap_stats["lambda_p_added"] = round(gap_stats["area_m2"] / (grid.xlen * grid.ylen), 4)
         gap_stats["remaining_narrow_m2"] = round(
-            remaining_narrow_area(fph, cfg.bbox, width, snap), 2)
+            remaining_narrow_area(fph, cfg.bbox, width, snap, grid=(dx, dy), inset=inset), 2)
         _write_fills(fills_path, fills, cfg.crs, "gap")
         print(f"[gaps] filled {gap_stats['pieces']} gaps narrower than {width:g} m "
               f"({gap_stats['area_m2']:g} m2, lambda_p +{gap_stats['lambda_p_added']:g}) "
@@ -333,7 +334,7 @@ def build_buildings(cfg: Config) -> dict:
             fph, _ = thread_through_fills(fph, yards, snap)
             # close the slivers cell-square fills leave against buildings; with
             # fill_gaps off, only those touching a courtyard fill (ours, not OSM's)
-            more, _ = fill_gaps(fph, cfg.bbox, width, inset=inset, snap=snap)
+            more, _ = fill_gaps(fph, cfg.bbox, width, inset=inset, snap=snap, grid=(dx, dy))
             if not bcfg.get("fill_gaps", True):
                 from shapely.strtree import STRtree
                 ytree = STRtree([p for p, _, _ in yards])

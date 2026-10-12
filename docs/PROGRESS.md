@@ -1,11 +1,11 @@
 # uDALES-Geo: where the project stands
 
-*Status on 2026-10-11, after the tree cut and the full independent review (§2, 2026-10-11). This page records
+*Status on 2026-10-12, after the tree cut, the full independent review and the wedge-tip fix with its three reviews (§2, 2026-10-11 and 2026-10-12). This page records
 what has been built, how it was checked, and what is still open. For how to
 use the tool see [README.md](../README.md); for how each stage works in detail
 see [AGENTS.md](../AGENTS.md). Numbers below come from the site reports in
-`sites/` (all five rebuilt 2026-10-11 at 12:00 with the final code, geometry
-identical to the 2026-10-05 builds; §4.6) and from
+`sites/` (all five rebuilt 2026-10-12 12:01 with the final version of the
+wedge-tip fix, byte-identical to the 01:17 build; §4.6) and from
 real uDALES preprocessing runs on this PC; where a number comes from
 somewhere else, the source is named.*
 
@@ -26,9 +26,11 @@ lattice rounding) and several geometry robustness bugs. On the three full
 sites run through real udprep IBM preprocessing (dx = 2 m), the final STLs
 have no narrow enclosed cavities in uDALES' own solid mask; the South
 Kensington example has 0 m² "Total area missing flux" and no unused facets,
-Earl's Court (gaps filled) 14.4 m² and no unused facets. Full
+Earl's Court (gaps filled) 14.4 m² (0.034 m² on the c grid since the
+wedge-tip fix of 2026-10-11) and no unused facets. Full
 surface-energy-balance (lEB) preprocessing (IBM, View3D, shortwave) on two
-200 m sub-sites built with the final code runs clean without View3D repair.
+200 m sub-sites built with the code of 2026-10-05 runs clean without View3D
+repair (not rerun after the wedge-tip fix).
 The tool is usable for momentum and heat runs. For lEB runs three things are
 not done: facet types (a backend exists, deliberately not switched on), facet
 size control (walls are single full-height quads), and the radiation edge
@@ -322,7 +324,113 @@ silent (the typo checker was removed on purpose); several features share
 an id for a relation with several outer rings (messages only); the domain
 is the box of the two given corners, so the other diagonal gives a box a
 few metres different (documented); wedge-shaped gaps above ~23° are not
-filled and hair-thin fills are not reported (documented, AGENTS.md §7.1).
+filled and hair-thin fills are not reported (documented, AGENTS.md §7.1;
+wedge tips were filled later the same day, see the next entry).
+
+**2026-10-11 (third part) — wedge tips and gap-fill robustness.** The
+owner asked whether the gap fills were really fixed. A diagnosis with
+udprep's own rules (a re-implementation of `matchFacetsToCells` matching
+udprep's logged missing flux to 4 decimals, which also counts the pieces
+udprep drops without a message) showed that wedge tips caused nearly all
+the remaining flux loss: the mitre opening regrows a V-shaped gap above
+~23° exactly, so its tip was never filled. It also showed that the "1–3 cm
+slits" were not slits but short corner walls and wedge tips seen by the
+5 cm probe. About twenty variants were evaluated on the five sites, the
+stress test and random wedges; an adversarial suite (32 layouts) and a
+challenge run found two hull overreach cases (a numerical spike let a tip
+fill cover a whole wedge, up to 160 m²), a tip at the domain edge that
+added a wall on the seam, and a GEOS TopologyException that stopped the
+build in 1 of 200 random layouts (also in the old code). `gaps.py` now
+fills wedge tips (with the spike clean-up, skipping edge tips), gives tips
+the lower height of their two walls, skips free-standing thin fills that
+hold no grid point (with `grid=(dx, dy)`), and repairs overlapping mitre
+openings. Real udprep (IBM): example missing flux 7.88 / 0.013 / 1.84 /
+2.92 → 0 / 0.013 / 0 / 0 m², Earl's Court (gaps filled) 7.66 / 14.37 /
+15.39 / 14.40 → 1.89 / 0 / 0.061 / 0.034 m², 0 cavities and 0 unused
+facets on both. An independent review of the change (code, tests,
+documentation and an adversarial breaker, every finding batch reproduced
+by a second agent) then confirmed: the thin-part check made gap filling
+quadratic in the site size (31 s at four times the Earl's Court area,
+against 1 s for the code before and 2.8 s after the fix, with identical
+fills); tips and the pockets that tip fills leave were one
+left-over part with one height, so a pocket closed by a low kiosk rose up to
+6.7 m above it (pockets are now claimed level by level with the tip fills as
+walls); the footprints' 1 cm precision model snapped the buffers that
+measure contact (a tip 15.5 m too high; fixed with floating-precision
+copies); a snap-rounding sliver of a tip claimed at a lower roof left a 2 m²
+crack beside the tip, enough to stop the build (slivers now take the
+taller fill's height); five behaviours without a test; and stale or
+imprecise documentation (the Earl's Court "open narrow slots", step
+numbers, the 613/614 note, the V-slot width, the thin-part numbers). Two
+proposed fixes were rejected after checking (they moved the error or were
+undone by the second gap pass). A second independent review (code, tests,
+documentation, an adversarial breaker with 558 new layouts in eight
+families, and a layout-by-layout comparison with the first version) then
+found: a near-degenerate opening after the tip subtraction that crashed the
+build in 1 of about 3000 random layouts (also in the first version); tips
+found in later rounds treated as pockets and dropped to the lowest building
+nearby; slivers raised into 18–29 m fins on a touch at one end; a sliver
+taking the height of a building it touches at one end; the precision copy
+in the thin-part check loosening the evaluated rule; untested guards; and
+documentation errors. Four combinations of fixes were compared on all 1558
+adversarial layouts; one that looked good (the two-wall height for every
+left-over pocket) caused a 1.4 m² crack that would stop a build and was
+rejected. That version had the same udprep numbers and site no-flux as the
+first version, halved the Earl's Court phantom walls (1.12 → 0.54 m²) and
+had less no-flux in total than the first version on the 1558 adversarial
+layouts (more in four of them, up to 119 m² in clutter_1_37), but those were
+the layouts it had been chosen on (next entry). 31 new test cases
+(158 in all). Details: AGENTS.md stage 10 and §5.3,
+docs/gap_filling_design.md §10.
+
+**2026-10-12 — third review of the gap fix: late tips.** A third
+independent review (the round-2 fixes, the tests, the documentation, and a
+sweep of 3600 fresh layouts from the same generators with new seeds) found
+that two round-2 fixes misfired on layouts they had not been chosen on:
+wedge tips found in later rounds, taken out of the pockets, took a
+building's full height in courtyards (up to 697 m² more walls without a
+facet section in one layout), and the rule for a sliver touching a building
+at one end sent other parts lined by one short building contact and fills
+to the lowest building nearby (88 m²). It also found decisions without a
+test and claims measured on the selection layouts. Late tips are now
+claimed with the pockets and then take the tip height, with this piece's
+fills counting as walls where fewer than two buildings line them; a part
+lined by one building along less than a quarter of its outline counts this
+piece's fills as walls too (AGENTS.md stage 10, step 6). Nine variants were
+compared, and single layouts showed why each rejected one failed (the
+fill rule on every tip lowered tips lined by one long building; applied
+always, it lowered a tip held by a second building; taking late tips out of
+the pockets left a slit). The choice was then checked on 3040 more layouts
+that no choice used. A fourth independent review (code, tests, documentation
+and a breaker on 1720 more fresh layouts, every finding reproduced by a
+second agent) found that the late-tip pass read neighbouring late tips at
+heights not yet corrected, so its result depended on the order of the fills
+(late tips no longer count each other as walls: 44 of about 8200 layouts
+change, 7 better by 44 m² in all, none worse), that the held-out comparison
+had been made against the first review's version and labelled as the
+second's, that the crack census had covered only the layouts where versions
+differ, and that several crop tests compared areas that float noise can
+tip. Against the version of the second review (installed before), total
+no-flux now falls by 150 m² on the held-out layouts (11 worse by more than
+1 m², 10 better) and by 1901 m² on the 3600 (10 worse, 16 better, the
+courtyard cases); two cracks of 1 m² or more of the first review's version
+come back (20 and 1.5 m²) and one of the second review's goes (2.3 m²).
+Against the first version: 2435 m² less on the held-out layouts, 22 worse
+(307 m²), 67 better, crack layouts 37 → 25. The five sites, the stress
+test, the adversarial suite and the random wedges give the same numbers as
+before, and no site STL changed. A pass over all 8360 fresh layouts finds
+layouts with a crack of 1 m² or more going from 74 with the code before to
+76, from the noding steps, not from the fill heights (AGENTS.md §7.1; not
+fixed). A final check found one more read of a height that is corrected
+later (slivers, now left out of the late-tip walls too: the fills of 2 of
+about 8200 test layouts change, no-flux and cracks do not) and float-noise-sensitive asserts in older crop tests. 11 new test
+cases (169 in all); all 20 crop tests pass under whole-centimetre shifts of
+their layouts. Every stage-10 decision fails a test when undone, except the
+thin-part check's precision (a fixture would sit on the threshold), rounds 3
+and 4, the sliver width (a trade-off: 4 snap steps would save 117 m² of
+no-flux and add 49 m² of phantom walls), the reference of the pocket
+fallback's thin-part check (fills under 0.01 m² in 5 of about 760 layouts),
+the sliver exclusion above and four rules that changed no layout there.
 - `docs/PIPELINE.md` and `docs/GUIDE.md` deleted; their content is in
   `AGENTS.md` and `README.md`.
 
@@ -347,9 +455,9 @@ only**; **counted only**; **not started**.
 | `las_dir` point clouds (legacy) | done, not run on real data | – | see §5.9 |
 | Height rules (p92, 1 m inset, ≥ 10 px; LiDAR-flat → OSM or left out; 0.1 m rounding) | done, verified | 3 tests; sites | |
 | Overlap resolution, tallest first, 1 cm snap | done, verified | sites | |
-| Gap filling (< W = dx, layered heights) | done, verified | 9 test functions in `test_gaps.py`; real udprep | per-level claim fixed in the review; `gap_fill_width_dx` 2 also fills 1–2-cell slots |
+| Gap filling (< W = dx, layered heights, wedge tips, thin parts) | done, verified | `test_gaps.py`, `test_gaps_tips.py`; real udprep (§4.2) | per-level claim fixed in the review; wedge tips filled 2026-10-11; `gap_fill_width_dx` 2 also fills 1–2-cell slots |
 | Hair-crack fix (lattice, threading, final noding) | done, verified | real udprep: S. Kensington 32.4 → 0 m²; 3 offline tests; stress test | `SNAP_TOL` 0.999 |
-| Hair-crack check (`_hair_cracks`, 1 cm) | done, verified | 0 on all sites with gap filling on (rebuilt 2026-10-11); used by 5 offline tests, one a positive control; 1–3 cm slits pass unseen (AGENTS.md §7.1) | stops the build with gap filling on from 1 m² of crack walls; warning below or with filling off |
+| Hair-crack check (`_hair_cracks`, 1 cm) | done, verified | 0 on all sites with gap filling on (rebuilt 2026-10-12); used by 5 offline tests, one a positive control; what a 5 cm probe found were short corner walls and wedge tips, not slits (AGENTS.md §7.1) | stops the build with gap filling on from 1 m² of crack walls; warning below or with filling off |
 | Narrow enclosed courtyards (#367) | done, verified | 9 tests; real udprep solid mask 43 / 229 / 297 → 0 narrow columns | udprep's solid tolerance; periodic labelling shared with `case_check`; overfill guard |
 | Grid fit uses dy = ylen / jtot | done | 1 test | equal to dx on all current sites |
 | Plugs at enclosed cell centres lying on an outline | done, verified | 2 tests; 1 plug at Earl's Court | round, only where solid all round |
@@ -399,10 +507,12 @@ only**; **counted only**; **not started**.
   (`cases_repo/301`: same namoptions, `solid_c.txt` and missing-flux lines).
 - The STLs in `cases_final` are byte-identical to the 2026-10-05 builds:
   612 to the South Kensington `sites/example` as it was until 2026-10-11
-  (since replaced by the West Village, Manhattan example, which has NOT been
-  run through udprep IBM or `case_check`), 613 and 614 to
-  `sites/compare_gaps_filled` and `sites/compare_gaps_open` (checked
-  2026-10-05). The `compare_heights_*` pair was not run through udprep.
+  (since replaced by the West Village, Manhattan example, which was run
+  through udprep IBM and `case_check` only for the wedge-tip fix, §4.2),
+  613 and 614 to
+  `sites/compare_gaps_filled` and `sites/compare_gaps_open` as built on
+  2026-10-05 (checked then; the sites were rebuilt after the wedge-tip fix
+  of 2026-10-11). The `compare_heights_*` pair was not run through udprep.
 
 ### 4.2 Full sites, IBM only, dx = dy = dz = 2 m
 
@@ -415,23 +525,28 @@ flux" per grid.
 |---|---|---|---|---|
 | South Kensington example (281 × 351 × 112) | 2026-09-29 (402) | 43 | 30.8 / 32.4 / 33.4 / 32.4 | 0 |
 | | before the review (512) | 0 | 0 / 0 / 0 / 0 | 0 |
-| | final (612) | **0** | **0 / 0 / 0 / 0** | **0** |
+| | 2026-10-05 (612) | **0** | **0 / 0 / 0 / 0** | **0** |
 | Earl's Court, gaps filled (276 × 358 × 48) | 2026-09-29 (403) | 229 | 14.6 / 31.2 / 20.4 / 20.0 | 2 (2.25 m², roofs of the sub-grid shed) |
 | | before the review (513) | 0 | 7.7 / 14.4 / 17.4 / 16.9 | 2 (0.73 m², two courtyard-fill roof slivers 6 m high under 9.5 m walls) |
-| | final (613) | **0** | 7.7 / 14.4 / 15.4 / **14.4** | **0** |
+| | 2026-10-05 (613) | **0** | 7.7 / 14.4 / 15.4 / **14.4** | **0** |
 | Earl's Court, `fill_gaps: false` (276 × 358 × 48) | 2026-09-29 (404) | 297 | 399.6 / 568.0 / 554.8 / 550.9 | 12 |
 | | before the review (514) | 0 | 237.2 / 333.6 / 345.7 / 349.5 | 21 |
-| | final (614) | **0** | 235.8 / 330.6 / 345.7 / 345.1 | 16 |
+| | 2026-10-05 (614) | **0** | 235.8 / 330.6 / 345.7 / 345.1 | 16 |
 
 - An earlier 2026-10-05 run (412–414, superseded) had 8 unused facets with
   gaps filled and 27 with gaps open.
 - The non-periodic scratch count gave 298 columns for 404; `case_check`
-  (periodic) gives 297. The tool's own census before courtyard filling (current
-  reports) gives 43, 228 and 297.
+  (periodic) gives 297. The tool's own census before courtyard filling gave
+  43, 228 and 297 in the reports of 2026-10-05; after the wedge-tip fix 40
+  (South Kensington twins), 220 and 297.
 - The IBM step took about 2 minutes per full Earl's Court site.
-- The missing flux left at Earl's Court (gaps filled) lies on walls of open
-  narrow slots, which are not enclosed and are not filled (§5.4), and on
-  facade details smaller than a cell.
+- The missing flux left at Earl's Court (gaps filled) in 613 sat in wedge
+  tips and one 12° V-slot (diagnosis of 2026-10-11). After the wedge-tip fix
+  (rebuilt site, case 201 from the repository scripts): 1.89 / 0 / 0.061 /
+  0.034 m², 0 narrow enclosed columns, 0 unused facets. The Manhattan
+  example (254 × 170 × 90, case 001): 7.88 / 0.013 / 1.84 / 2.92 m² before
+  (commit 43f5bc8), 0 / 0.013 / 0 / 0 after, 0 columns and 0 unused facets
+  in both. AGENTS.md §5.3 has the details.
 - The 16 unused facets of the `fill_gaps: false` variant (not the default)
   have not been looked into.
 
@@ -487,12 +602,14 @@ with light-wells, slits to the street, small sheds, corners on cell centres)
 and runs stages 9–12 in memory. With the final code, two seeds × 150 layouts:
 hair cracks in 2 and 2 layouts (131 of 150 before the review fixes), at most
 0.27 m² (rerun 2026-10-11: 0.096 and 0.268 m²), none next to a plug; no
-narrow enclosed columns left after filling in any layout.
+narrow enclosed columns left after filling in any layout. The same after the
+wedge-tip fix (overlapping outlines in 34 and 23 layouts, 27 and 22 before,
+the largest 0.08 m² both before and after).
 
 ### 4.5 Offline tests
 
-`python -m pytest tests -q` on 2026-10-11: 127 passed in about 2 s (101 test
-functions, 127 cases after parametrisation).
+`python -m pytest tests -q` on 2026-10-12: 169 passed in about 2 s (141 test
+functions, 169 cases after parametrisation).
 
 | File | Functions | Cases |
 |---|---|---|
@@ -501,24 +618,24 @@ functions, 127 cases after parametrisation).
 | `tests/test_edges.py` | 7 | 7 |
 | `tests/test_facet_types.py` | 2 | 2 |
 | `tests/test_gaps.py` | 13 | 14 |
+| `tests/test_gaps_tips.py` | 40 | 42 |
 | `tests/test_grid_fit.py` | 17 | 17 |
 | `tests/test_osm.py` | 3 | 16 |
 | `tests/test_osm_heights.py` | 5 | 5 |
 | `tests/test_rasters.py` | 4 | 7 |
 | `tests/test_vegetation.py` | 37 | 38 |
-| **Total** | **101** | **127** |
+| **Total** | **141** | **169** |
 
 ### 4.6 Current site numbers
 
-From `sites/<name>/buildings.report.json` and `site.report.json`, rebuilt
-2026-10-05 02:14–02:15; all five rebuilt again on 2026-10-11 (12:00) with
-the final code: the geometry rows are unchanged (same face counts, same
-hair cracks), the tree rows below show the 2026-10-11 values. The `example`
-column is the South Kensington build of 2026-10-05: since 2026-10-11
-`example` is West Village, Manhattan (508 × 340 m, 340 buildings, 14340
-faces, OSM heights, Meta canopy map, box trees, `voxel_method "exact"`, 230
-trees, 27 554 cells, 137 crowns cut around buildings, 0 m³ of tree solid
-inside buildings).
+From `sites/<name>/buildings.report.json` and `site.report.json`. The four
+comparison columns are the rebuild of 2026-10-12 with the final version of
+the wedge-tip fix (their tree rows did not change). The `example` column is the South
+Kensington build of 2026-10-05: since 2026-10-11 `example` is West Village,
+Manhattan (508 × 340 m, 340 buildings, 14240 faces after the wedge-tip fix,
+OSM heights, Meta canopy map, box trees, `voxel_method "exact"`, 230 trees,
+27 554 cells, 137 crowns cut around buildings, 0 m³ of tree solid inside
+buildings).
 
 Geometry and grid fitting:
 
@@ -532,17 +649,17 @@ Geometry and grid fitting:
 | heights LiDAR / OSM / default | 194 / 2 / 9 | 0 / 150 / 56 | 194 / 2 / 8 | 507 / 8 / 8 | 507 / 8 / 8 |
 | left out, LiDAR flat | 2 | 0 | 2 | 0 | 0 |
 | buildings meshed | 204 | 205 | 203 | 521 | 521 |
-| gap fills: pieces, area | 33, 192.9 m² | 33, 192.9 m² | 33, 192.9 m² | 136, 583.4 m² | off |
-| buildings threaded through fills | 13 | 13 | 13 | 101 | – |
-| narrow enclosed columns before (tool census) | 43 | 43 | 43 | 228 | 297 |
-| courtyard fills, area | 9, 174.1 m² | 9, 174.1 m² | 9, 174.1 m² | 65, 846.5 m² | 121, 995.6 m² |
-| pockets filled by outline / by cells | 91 / 17 | 54 / 11 | 91 / 17 | 253 / 147 | 237 / 513 |
-| second-pass gap fills, area | 1, 0.2 m² | 1, 0.2 m² | 1, 0.2 m² | 53, 61.7 m² | 194, 272.7 m² |
+| gap fills: pieces, area | 33, 192.9 m² | 35, 208.9 m² | 35, 208.9 m² | 139, 690.5 m² | off |
+| buildings threaded through fills | 13 | 12 | 12 | 110 | – |
+| narrow enclosed columns before (tool census) | 43 | 40 | 40 | 220 | 297 |
+| courtyard fills, area | 9, 174.1 m² | 8, 165.1 m² | 8, 165.1 m² | 61, 829.0 m² | 121, 995.6 m² |
+| pockets filled by outline / by cells | 91 / 17 | 54 / 0 | 91 / 0 | 260 / 120 | 237 / 513 |
+| second-pass gap fills, area | 1, 0.2 m² | 0 | 0 | 54, 64.3 m² | 208, 295.3 m² |
 | unseen footprints dropped | 0 | 0 | 0 | 1 | 1 |
 | outlines changed by final noding | 2 | 2 | 2 | 11 | 52 |
 | plugs | 0 | 0 | 0 | 1 | 1 |
 | narrow enclosed columns after | 0 | 0 | 0 | 0 | 0 |
-| open narrow cells after | 2572 | 1625 | 2572 | 10383 | 10713 |
+| open narrow cells after | 2572 | 1625 | 2572 | 10257 | 10700 |
 | λp | 0.278 | 0.278 | 0.278 | 0.316 | 0.315 |
 
 `courtyard_fills.geojson` holds the courtyard fills (`kind` "courtyard") and
@@ -556,8 +673,8 @@ Mesh, checks, grid and trees:
 | | example | compare_heights_osm | compare_heights_lidar | compare_gaps_filled | compare_gaps_open |
 |---|---|---|---|---|---|
 | valid | yes | yes | yes | yes | yes |
-| faces | 11244 | 10714 | 11228 | 26908 | 27928 |
-| smallest face [m²] | 1.5e-3 | 1.8e-3 | 1.5e-3 | 5.0e-5 | 5.0e-5 |
+| faces | 11244 | 10722 | 11238 | 26952 | 27954 |
+| smallest face [m²] | 1.5e-3 | 3.0e-4 | 3.0e-4 | 5.0e-5 | 5.0e-5 |
 | faces under 1e-4 m² | 0 | 0 | 0 | 9 | 9 |
 | hair-crack walls | 0 | 0 | 0 | 0 | 4, 48.4 m² (warning: the original OSM slits) |
 | accepted corner contacts | 2 | 1 | 2 | 1 | 1 |
@@ -641,12 +758,14 @@ region, or add a buffer strip.
 ### 5.4 Open narrow slots
 
 Street-connected fluid cells not covered by any 3 × 3 fluid block are
-counted (`grid_fit.after.open_narrow_cells`: 2572 in South Kensington, 10 383
+counted (`grid_fit.after.open_narrow_cells`: 2572 in South Kensington, 10 257
 at Earl's Court) but not filled. In #367 filling them was tried and dropped
 in favour of solver-side damping (`lnarrowdamp`, `cs_floor`), which exists
 only on the issue author's branch and is not in uDALES master, so a current
-uDALES run does nothing about these slots. They carry most of the missing
-flux left at Earl's Court (14.4 m²). Options: leave as is (current), fill
+uDALES run does nothing about these slots. The missing flux once ascribed to
+them at Earl's Court (14.4 m²) sat in wedge tips and one V-slot; after the
+wedge-tip fix 0.034 m² is left on the c grid (1.89 m² on u, at an acute
+building corner). Options: leave as is (current), fill
 1–2-cell slots with `gap_fill_width_dx: 2` (changes λp and closes real
 2–4 m passages), or add a report-only check like PALM's one-grid-point rule
 (a fluid cell with at least 4 of its 6 neighbours solid).
