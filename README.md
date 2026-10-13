@@ -20,7 +20,8 @@ Where the project stands: [docs/PROGRESS.md](docs/PROGRESS.md).
   to suit the uDALES grid: gaps and courtyards too narrow for the grid are
   filled, buildings too small for it are dropped, and no faces small enough to
   crash an energy-balance run are left.
-- **Periodic domains**: buildings on the domain edge kept whole.
+- **Periodic domains**: buildings on the domain edge kept whole, and copies
+  of the tile when the flow needs a larger domain.
 - **Trees** (optional) from LiDAR or a worldwide canopy map, cut around the
   buildings, written as uDALES vegetation files.
 
@@ -172,6 +173,10 @@ flowchart TD
 - **Periodic domains** (`"edge_buildings": "extend"`): an edge building is kept
   whole if at least half of it lies in your box, otherwise removed whole; the
   domain grows to fit with one cell of open ground at each edge.
+- **Copies of the tile** (`"tile": [2, 1]`): the finished periodic tile is
+  repeated nx × ny times (buildings only, after the heights): the same
+  morphology in a domain large enough for the flow (convective rolls span
+  kilometres). The grid and `site.report.json` describe the tiled domain.
 - **Grid fitting** (`fill_gaps`, `gap_fill_width_dx`, `fill_courtyards`,
   `courtyard_min_cells`, `drop_unseen_buildings` — all on by default): see
   "How it works", step 5. The fills are in `gap_fills.geojson` and
