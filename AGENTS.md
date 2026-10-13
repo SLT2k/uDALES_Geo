@@ -61,6 +61,7 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `region.py` | corners → projected domain box (`make_region`), `on_lattice`, `region_from_bbox`, `auto_utm` |
 | `osm.py` | Overpass download, relation ring assembly, courtyards to their outer ring, OSM height parsing, GeoJSON in the site CRS |
 | `edges.py` | `edge_buildings: "extend"`: keep edge buildings whole and grow the domain |
+| `tile.py` | `tile: [nx, ny]`: copies of the periodic tile after the heights (stage 8b) |
 | `footprints.py` | load, clip, split and filter footprints (`load_footprints`); legacy CRS detection and non-GeoJSON readers |
 | `surface.py` | LiDAR nDSM for building heights: your DSM/DTM files or the shared downloader |
 | `rasters.py` | shared LiDAR downloader: `SOURCES` table (England, Netherlands, Flanders, France), tiling, caching, validation |
@@ -81,6 +82,7 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | file | covers |
 |---|---|
 | `test_edges.py` | extend policy (growth, clearance, min_inside, limits, bad mode); LiDAR roof percentile vs eaves |
+| `test_tile.py` | copies of the tile: translation, domain and grid growth, the `tile` key |
 | `test_osm_heights.py` | relation courtyards to the smallest containing outer (nested buildings); LiDAR-flat rule |
 | `test_osm.py` | height-tag parsing (finite, positive metres only), `building=no` left out, a courtyard ring that is a building kept, an incomplete Overpass answer refused |
 | `test_config.py` | null = default, `expnr` 0–999, error line numbers after block comments, corner order, antimeridian, the vegetation switch, grid spacing when xlen is not a multiple of dx |
@@ -253,7 +255,8 @@ flowchart TD
     LAT --> LID["6 LiDAR nDSM, unless height_source osm<br/>cache/lidar/, ndsm.tif"]
     LID --> FP["7 Footprints into the domain<br/>clip 2 cm inside the edge, drop parts under min_area"]
     FP --> HGT["8 One height per footprint<br/>LiDAR, else OSM, else default_height"]
-    HGT --> CLN["9 Clean-up<br/>heights to 0.1 m, overlaps cut tallest first"]
+    HGT --> TILE["8b Copies of the tile, tile<br/>nx x ny translated copies, domain and grid grow"]
+    TILE --> CLN["9 Clean-up<br/>heights to 0.1 m, overlaps cut tallest first"]
     CLN --> GAP["10 Sub-grid gap filling, fill_gaps<br/>opening per piece, wedge tips, layered heights, threading<br/>gap_fills.geojson"]
     GAP --> FIT["11 Grid fit<br/>narrow enclosed courtyards, second gap pass,<br/>unseen buildings, final noding, plugs, census<br/>courtyard_fills.geojson"]
     FIT --> MESH["12 Meshing<br/>snap-rounded partition, CDT, wall quads"]
@@ -295,6 +298,7 @@ Stages 1–6 and 14–16 run in `build.py: build_site`; stages 7–13 in
 | `output_dir` | `../sites/<name>` | 1 |
 | `edge_buildings` | `"clip"` | 4 |
 | `edge_min_inside`, `edge_clearance_m`, `edge_max_extend_m` | 0.5, dx, 50 m | 4 |
+| `tile` | `[1, 1]` | 8b |
 | `buildings` | `build.DEFAULTS`, plus inline fallbacks (§4.8) | 4–13 |
 | `vegetation` | missing = no trees; keys from `vegetation.DEFAULTS` | 15 |
 
@@ -525,6 +529,48 @@ Where both values exist, LiDAR − OSM goes into the report (`lidar_minus_osm_m`
 n, median, median absolute; +3.77 m median in South Kensington). No footprint
 left → `ValueError` "no footprints survived height assignment". The legacy
 `las_dir` route is in §3.17.
+
+### Stage 8b. Copies of the tile (new 2026-10-13)
+
+`buildings.py: build_buildings`, `tile.py: parse_tile, tile_footprints, tile_grid`
+
+Only with `tile: [nx, ny]` other than `[1, 1]`. The footprints of the single
+tile, with their heights from stage 8, are copied nx × ny times, copy (i, j)
+translated by (i xlen, j ylen); the domain becomes nx xlen × ny ylen with the
+same lower-left corner and the grid nx itot × ny jtot cells (dx, dy, dz
+unchanged). `cfg.bbox` and `cfg.grid` are replaced by the tiled ones, and
+`build_site` reads them back for the final region, grid, λp, overview and
+report. Everything from stage 9 on sees the tiled domain, so overlaps, gap
+fills, courtyard fills, plugs, noding and the mesh are made across the
+internal seams exactly as across the periodic seam.
+
+Why copies and not a larger box: a periodic domain cut from a real city is
+often too small for the flow it should hold (convective rolls span
+kilometres and lock onto a 500 m box), while framing a larger area changes
+the morphology; copies keep the morphology and multiply the domain.
+
+Rules:
+
+- Meant for a periodic tile (`edge_buildings: "extend"`): no building crosses
+  the tile edge, so copies are ≥ 2 × `edge_clearance_m` apart. With `"clip"`
+  the cut stumps of neighbouring copies face each other across every
+  internal seam, 2 × `boundary_inset` apart (gap filling closes that slot);
+  a NOTE is printed, since that is as wrong as a periodic domain with clipped
+  edges always is.
+- Buildings only: trees come from rasters of the real site, which the copies
+  do not have. `tile` with vegetation on is a `ConfigError`, raised before
+  any download.
+- The corner stays where stage 5 put it, and the offsets are multiples of
+  `snap_m`, so the copies' vertices are on the lattice when the original's
+  are (§4.2).
+- `las_dir` heights (§3.17) are assigned per footprint before the copies are
+  made, so the copies get them too.
+
+Report: `tile` in `site.report.json` (`copies`, `tile_m`,
+`footprints_per_tile`; `null` when not tiled). `buildings.n_buildings`, the
+fills and `lambda_p` count every copy; `footprints` (stage 7), `heights`
+(stage 8) and `edge_buildings` describe the single tile. The copies' props carry
+`"tile": [i, j]`, so ids in `dropped_unseen` repeat per copy.
 
 ### Stage 9. Footprint clean-up
 
@@ -1240,6 +1286,7 @@ heights, gaps, courtyards, STL, trees, grid and the `udales/` path.
 ### 3.17 Non-default and legacy options
 
 - `edge_buildings: "extend"` — stage 4; used by all five configs.
+- `tile: [nx, ny]` — stage 8b: copies of the periodic tile, buildings only.
 - `buildings.height_source: "osm"` — no LiDAR download; OSM height, else
   `default_height` (`las_dir` is still used if set).
 - `buildings.height_source: "lidar"` — as `"auto"`, but stop without LiDAR.
@@ -1367,7 +1414,9 @@ whole chain.
 Rules that follow:
 
 - Do not move or resize the domain after `on_lattice` (any new domain logic
-  goes before it in `build_site`).
+  goes before it in `build_site`). The one exception is tiling (stage 8b),
+  which appends whole copies east and north: the corner does not move, and
+  the offsets are multiples of `snap_m`.
 - Any new geometry step between stage 9 and meshing must produce lattice
   vertices (`grid_size=snap` overlays, then `_area`/`_polygons` to drop
   collapsed lines) and run before `node_together`. The one existing exception

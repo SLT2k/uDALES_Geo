@@ -35,6 +35,11 @@
                                    //   (so buildings across the periodic seam are >= 2 dx apart)
   "edge_max_extend_m": 50.0,       // extend: stop with a message if a side would grow more than this [m]
 
+  // ======================== copies of the tile ========================
+  "tile": [1, 1],                  // copies of the finished periodic tile in x and y (buildings only):
+                                   //   [2, 1] = the domain twice as long with the same morphology.
+                                   //   Meant for "edge_buildings": "extend"; needs vegetation off
+
   // ======================== buildings (from OpenStreetMap) ========================
   "buildings": {
     "default_height": 10.0,        // [m] for buildings with no height in OpenStreetMap

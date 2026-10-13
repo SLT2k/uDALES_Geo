@@ -288,6 +288,22 @@ def build_buildings(cfg: Config) -> dict:
         raise ValueError("no footprints survived height assignment")
     fph = [(p, round(round(h / HEIGHT_STEP) * HEIGHT_STEP, 6), props) for p, h, props in fph]
 
+    # ---- copies of the periodic tile (tile.py): after the heights, before the
+    # clean-up; cfg carries the tiled bbox and grid back to build_site ----------
+    tile_stats = None
+    nx, ny = tuple(bcfg.get("_tile") or (1, 1))
+    if (nx, ny) != (1, 1):
+        from .tile import tile_footprints, tile_grid
+        n_tile = len(fph)
+        fph, cfg.bbox = tile_footprints(fph, cfg.bbox, nx, ny)
+        cfg.grid = grid = tile_grid(grid, nx, ny)
+        tile_stats = {"copies": [nx, ny],
+                      "tile_m": [round(grid.xlen / nx, 3), round(grid.ylen / ny, 3)],
+                      "footprints_per_tile": n_tile}
+        print(f"[tile] {nx} x {ny} copies of the {tile_stats['tile_m'][0]:g} x "
+              f"{tile_stats['tile_m'][1]:g} m tile -> {grid.xlen:g} x {grid.ylen:g} m, "
+              f"{len(fph)} footprints")
+
     snap = float(bcfg.get("snap_precision", 0.01))
     fph = resolve_footprint_overlaps(
         fph, min_part_area=float(bcfg.get("overlap_min_part_area", 1.0)),
@@ -555,6 +571,7 @@ def build_buildings(cfg: Config) -> dict:
         "pathological_edges": pathological_edges,
         "footprints": fp_stats,
         "heights": h_stats,
+        "tile": tile_stats,
     }
     write_report(out_stl.with_suffix(".report.json"), result)
     status = "OK" if result["valid"] else "INVALID"

@@ -4,8 +4,8 @@ grid fitting, a checked STL (+ trees) -> uDALES inputs in sites/<name>/udales/.
 build_site() runs the stages in order (every stage in detail: AGENTS.md):
 domain from the corners -> OSM download (cached per box) -> edge buildings
 (clip / extend) -> domain corner onto the snap lattice -> LiDAR heights ->
-buildings.build_buildings (footprints, heights, overlaps, gap filling, grid
-fitting, mesh, checks) -> grid -> udales/geom.<expnr>.stl -> vegetation ->
+buildings.build_buildings (footprints, heights, tile copies, overlaps, gap
+filling, grid fitting, mesh, checks) -> grid -> udales/geom.<expnr>.stl -> vegetation ->
 overview.png and site.report.json.
 
 Config reference: configs/example.jsonc lists every key with its default
@@ -20,7 +20,7 @@ import shutil
 from pathlib import Path
 
 from .common import Config, ConfigError, Grid, load_jsonc, resolve_udales_tools, write_report
-from .region import make_region
+from .region import make_region, region_from_bbox
 
 DEFAULTS = {
     "height_attribute": "height",   # what osm.py writes
@@ -162,6 +162,14 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
                           "opposite corners copied from openstreetmap.org")
     name = site.get("name", config_file.stem)
     expnr = _expnr(site)                      # checked before any download
+    from .tile import parse_tile
+    from .vegetation import is_enabled
+    tile = parse_tile(site)                   # checked before any download, too
+    if tile != (1, 1) and is_enabled(site.get("vegetation")):
+        raise ConfigError(
+            '"tile" repeats the buildings only: the trees come from rasters of the real '
+            'site, which the copies do not have. Set "vegetation": {"enabled": false} (or '
+            'remove the section) to tile the domain.')
     tools = site.get("udales_tools")
     udales_tools = resolve_udales_tools(
         (config_file.parent / tools).resolve() if tools else None)   # fail before fetching
@@ -224,7 +232,6 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
     footprints_path = gj_path
     if edge_mode != "clip":
         from .edges import apply_edge_policy
-        from .region import region_from_bbox
         clearance = site.get("edge_clearance_m")
         clearance = dx if clearance is None else float(clearance)
         kept, new_bbox, edge_report = apply_edge_policy(
@@ -240,6 +247,10 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         footprints_path.write_text(json.dumps({**{k: v for k, v in gj.items() if k != "features"},
                                                "features": kept}), encoding="utf-8")
     grew = any(edge_report.get("growth_m", {}).values())   # "extend" may not need to grow
+    if tile != (1, 1) and edge_mode == "clip":
+        print('[tile] NOTE: "tile" with edge_buildings "clip": the cut stumps of neighbouring '
+              'copies face each other across every internal seam, as across the periodic '
+              'seam; "extend" keeps the tile periodic-safe')
 
     # --- domain corner onto the snap grid (region.on_lattice) --------------
     from .region import on_lattice
@@ -279,6 +290,7 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
     bcfg["source_crs"] = region.crs        # already projected by osm.py
     bcfg["output_stl"] = str(out_dir / "buildings.stl")
     bcfg["_dz"] = float(site.get("dz") or dx)   # grid_fit tests cell levels
+    bcfg["_tile"] = tile                        # copies of the tile, made after the heights (tile.py)
 
     grid = _suggest_grid(region, dx, h_max=100.0)  # provisional; refined below
 
@@ -292,6 +304,8 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
 
     from .buildings import build_buildings
     result = build_buildings(cfg)
+    if tile != (1, 1):            # build_buildings tiled the footprints: cfg carries the tiled box
+        region = region_from_bbox(region.crs, cfg.bbox, region.raw_bbox)
 
     h_max = result["heights"]["height_max"] or 10.0
     grid = _suggest_grid(region, dx, h_max=h_max, dz=site.get("dz"), zsize=site.get("zsize"))
@@ -325,6 +339,7 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         "name": name,
         "region": region.report(),
         "edge_buildings": edge_report,
+        "tile": result["tile"],
         "building_heights": {**height_prov, **{k: result["heights"].get(k) for k in
                              ("from_lidar", "from_attribute", "from_default",
                               "lidar_minus_osm_m")}},
@@ -350,6 +365,9 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
              " to keep edge buildings whole" if grew else "")
     print(f"  domain    : {region.xlen:g} x {region.ylen:g} m ({region.crs}{grown}), "
           f"edge buildings: {edge_mode}")
+    if tile != (1, 1):
+        print(f"  tile      : {tile[0]} x {tile[1]} copies of {result['tile']['tile_m'][0]:g} x "
+              f"{result['tile']['tile_m'][1]:g} m")
     print(f"  buildings : {result['n_buildings']} meshed / {n_fetched} fetched "
           f"({report['fetch']['height_tag_coverage_pct']}% height-tagged), "
           f"lambda_p {lam_p:.3f}")
