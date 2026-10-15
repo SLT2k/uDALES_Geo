@@ -13,6 +13,21 @@ roof percentile is only a height after subtracting local ground level.
 `las_ground_level` in the config is either a number (flat, known datum) or
 "auto" (default): per-footprint ground = median of ground-class returns within
 `las_ground_buffer` m of the footprint, falling back to the global ground median.
+
+Two surfaces (assign_heights_two_surfaces, new 2026-10-15): a point cloud with
+building returns gives a second nDSM of those returns only (`_ndsm_building`).
+It is read first: a tree crown inside the footprint cannot reach it. Footprints
+with too few building returns (a shed under a tree), and every footprint of a
+point cloud without a building class, take the all-surface nDSM, where the
+percentile falls back to the median when the two differ by more than
+`lidar_spread_fallback_m` (the pixels are not one roof); a median below
+min_height is LiDAR seeing no building (an open lot under trees): OSM height or
+left out. Raster sources keep the percentile unless `lidar_spread_everywhere`.
+Checked on a Sydney suburb (the two surfaces' percentiles differ by more than
+5 m for 2 % of the houses; the spread test does not flag pitched roofs on the
+building surface) and on a Miami tile without a building class (218 buildings
+with measured OSM heights: the all-surface p95 is a median 3.1 m above them and
+56 % are more than 3 m off; with the fallback -0.3 m and 20 %).
 """
 from __future__ import annotations
 
@@ -175,6 +190,8 @@ def assign_heights(footprints, bcfg: dict) -> tuple[list, dict]:
         las_heights = _raster_heights(footprints, bcfg)
     else:
         las_heights = None
+    if bcfg.get("_lidar_values") is not None:    # one value per footprint, chosen by assign_heights_two_surfaces
+        las_heights = list(bcfg["_lidar_values"])
 
     out, n_from_las, n_from_attr, n_from_default, n_dropped, n_too_low = [], 0, 0, 0, 0, 0
     n_lidar_flat = 0
@@ -229,8 +246,110 @@ def assign_heights(footprints, bcfg: dict) -> tuple[list, dict]:
         "height_max": max((h for _, h, _ in out), default=None),
     }
     if diffs:
-        d = np.asarray(diffs)
-        stats["lidar_minus_osm_m"] = {"n": int(d.size), "median": round(float(np.median(d)), 2),
-                                      "median_abs": round(float(np.median(np.abs(d))), 2)}
+        stats["lidar_minus_osm_m"] = _lidar_minus_osm(diffs)
     print(f"[heights] {stats}")
     return out, stats
+
+
+def _lidar_minus_osm(diffs) -> dict:
+    """The report's check on the OSM heights: n, median and median |LiDAR - OSM|."""
+    d = np.asarray(diffs, dtype=float)
+    return {"n": int(d.size), "median": round(float(np.median(d)), 2),
+            "median_abs": round(float(np.median(np.abs(d))), 2)}
+
+
+def _osm_diffs(pairs, attr) -> list:
+    """LiDAR - OSM height over [(LiDAR height, props)], where the footprint has an OSM height."""
+    return [h - a for h, pr in pairs if (a := _attribute_height(pr, attr)) is not None]
+
+
+def assign_heights_two_surfaces(footprints, bcfg: dict) -> tuple:
+    """assign_heights on the building-class nDSM first (bcfg["_ndsm_building"], if
+    any), then on the all-surface nDSM (bcfg["_ndsm"]) for the footprints left
+    without a height.
+
+    Median fallback (lidar_spread_fallback_m [3 m]; null: never): where the
+    all-surface percentile exceeds the median by more than that, the pixels are
+    not one roof (a tree crown over it, a mast) and the median is the LiDAR value
+    instead. A median below min_height means LiDAR sees no building there (an open
+    lot under trees, a demolished house): as for any LiDAR value below
+    min_height, the OSM height, else the footprint is left out. The fallback is
+    on for point clouds (bcfg["_ndsm_building"] or bcfg["_ndsm_point_cloud"]):
+    the footprints without enough building returns, or every footprint of a
+    cloud without a building class. Raster sources (and dsm_file/dtm_file) keep
+    the percentile unless lidar_spread_everywhere is true: a pitched roof has a
+    large spread too, and their sites keep their heights; there this is
+    assign_heights itself.
+    Returns (fph, stats): counters summed, 'by_surface' per pass, and
+    lidar_minus_osm_m over the LiDAR heights of both passes."""
+    building = bcfg.get("_ndsm_building")
+    if building is not None and building[0] is None:
+        building = None
+    spread = bcfg.get("lidar_spread_fallback_m", 3.0)
+    attr = bcfg.get("height_attribute")
+    min_h = float(bcfg.get("min_height", 0.0))
+    max_h = float(bcfg.get("max_plausible_height", 300.0))
+    fph, by, left = [], {}, list(footprints)
+    lidar_used = []              # (LiDAR height, props) of every footprint given its LiDAR value
+    if building is not None:
+        fph, s1 = assign_heights(footprints, {**bcfg, "_ndsm": building, "height_attribute": None,
+                                                "default_height": None})
+        lidar_used = [(h, pr) for _, h, pr in fph]          # all of this pass: LiDAR values
+        d1 = _osm_diffs(lidar_used, attr)
+        if d1:                   # the pass ran without the attribute, so it could not count these
+            s1["lidar_minus_osm_m"] = _lidar_minus_osm(d1)
+        by["building_class"] = s1
+        got = {id(p) for p, _, _ in fph}
+        left = [(g, pr) for g, pr in footprints if id(g) not in got]
+    point_cloud = building is not None or bool(bcfg.get("_ndsm_point_cloud", False))
+    use_fallback = spread is not None and (point_cloud or bool(bcfg.get("lidar_spread_everywhere", False)))
+    per_footprint = bcfg.get("_ndsm") is not None and (building is not None or use_fallback)
+    n_fb = n_none = 0
+    if left and not per_footprint:
+        f2, s2 = assign_heights(left, bcfg)                 # a raster source: the plain rule
+        fph = fph + f2
+        by["all_surface"] = dict(s2, median_fallback=0)
+    elif left:
+        # the LiDAR value of each footprint, chosen here and handed to assign_heights,
+        # which applies min_height / max_plausible_height / OSM height to it as usual
+        raw = {**bcfg, "height_attribute": None, "default_height": None,
+               "min_height": -np.inf, "max_plausible_height": np.inf}
+        pct = {id(p): h for p, h, _ in assign_heights(left, raw)[0]}
+        med = ({id(p): h for p, h, _ in assign_heights(left, {**raw, "height_percentile": 50.0})[0]}
+               if use_fallback else {})
+        values = []
+        for g, _ in left:
+            v, m = pct.get(id(g)), med.get(id(g))
+            if v is not None and m is not None and v - m > float(spread):
+                v = m
+                if m < min_h:
+                    n_none += 1          # no building seen: OSM height or left out (dropped_lidar_flat)
+                else:
+                    n_fb += 1
+            values.append(v)
+        f2, s2 = assign_heights(left, {**bcfg, "_ndsm": None, "las_dir": None, "_lidar_values": values})
+        lidar_used += [(v, pr) for v, (_, pr) in zip(values, left) if v is not None and min_h <= v <= max_h]
+        fph = fph + f2
+        by["all_surface"] = dict(s2, median_fallback=n_fb, median_below_min_height=n_none)
+    last = by.get("all_surface") or by.get("building_class") or {}
+    stats = {"kept": len(fph),
+             "from_lidar": sum(v.get("from_lidar", 0) for v in by.values()),
+             "from_attribute": sum(v.get("from_attribute", 0) for v in by.values()),
+             "from_default": sum(v.get("from_default", 0) for v in by.values()),
+             "dropped_no_height": last.get("dropped_no_height", 0),
+             "dropped_below_min_height": last.get("dropped_below_min_height", 0),
+             "dropped_lidar_flat": last.get("dropped_lidar_flat", 0),
+             "height_min": min((h for _, h, _ in fph), default=None),
+             "height_max": max((h for _, h, _ in fph), default=None),
+             "median_fallback": n_fb}
+    if building is not None or per_footprint:
+        d = _osm_diffs(lidar_used, attr)
+        if d:
+            stats["lidar_minus_osm_m"] = _lidar_minus_osm(d)
+        stats["by_surface"] = by
+        print(f"[heights] {len(fph)} heights: {by.get('building_class', {}).get('kept', 0)} from the building "
+              f"class, {by.get('all_surface', {}).get('kept', 0)} from the all-surface pass ({n_fb} by the "
+              f"median; {n_none} with a median below min_height: OSM height or left out)")
+    elif "lidar_minus_osm_m" in last:
+        stats["lidar_minus_osm_m"] = last["lidar_minus_osm_m"]
+    return fph, stats

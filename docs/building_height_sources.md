@@ -185,6 +185,7 @@ FZ id is kept below for reference; the rows, the cities table and the
 - licence: Open (free reuse)
 - separates buildings: LAZ classified (inferred class 6)
 - notes: opendata.geoportal.gov.pl ignores Range, so every GET pulls the whole file. The NMPT WCS returns rendered RGB and is unusable.
+- float route (2026-10-21): the same NMPT WCS with `format=image/x-aaigrid` returns float heights to the centimetre (an ASCII grid in a multipart response), unlike `image/tiff`; left for a later PR.
 
 **Denmark / Sweden / Finland — Dataforsyningen DHM WCS; Lantmateriet STAC; NLS APIs** (free_login_or_token, probed)
 
@@ -360,6 +361,32 @@ FZ id is kept below for reference; the rows, the cities table and the
 - 7. COG/STAC tile readers (Scotland SRSP, Wales WFS, NZ LINZ, Canada HRDEM, swisstopo) - reliable and windowed, but none serve the listed cities. Effort: ~0.5 day each; later.
 - 8. ELVIS (Sydney, Adelaide, Hobart) - the open search API needs Origin/Referer headers; files need boto3 + an AWS account (requester pays) and LAZ processing with laspy (class 6 or first-return percentile minus the DEM). Tiles are 30-280 MB. Effort: 1-2 days, plus user AWS setup and a small cost. Offer a 'user supplies downloaded LAZ/DEM' path first.
 - 9. Local-file input (user-supplied DSM/DTM GeoTIFF or LAZ) - covers every manual/token source (ELVIS web order, VWorld Korea, Spain CNIG, Denmark/Sweden/Finland). Effort: ~0.5 day. Worth doing early because it unlocks all non-automatic cities.
+
+## Added 2026-10-15: what the new downloaders found on real sites
+
+- **USGS 3DEP (`usgs3dep`)**: the EPT bucket covers most cities (Detroit 2017,
+  Phoenix 2020, New York 2017 tested); the tile server gives about 200 kB/s, so
+  a 1 km site is 2–30 minutes on the first run and nothing after (cache). The
+  z unit is not in the metadata: Detroit is metres, Miami-Dade 2024 (TNM route,
+  93 MB tiles) is feet; the class-2 ground raster against the 3DEP 1 m DEM
+  decides (median |difference| 0.1–0.3 m with the right unit, 60+ m with the
+  wrong one). Building classification (class 6) is rare: of the eight projects
+  behind the US sites prepared in 2026-10, only MA Central Eastern 2021
+  (Boston) and IL Cook 2017 (Chicago) have building returns; MI Wayne 2017
+  (Detroit), AZ Maricopa 2020 (Phoenix), CA Orange 2011 (Los Angeles),
+  Miami-Dade 2024, New York City and MD/VA Sandy 2014 (Washington) have none,
+  so their heights come from the all-surface nDSM with the median fallback.
+  A TNM project whose LAS header carries no CRS is skipped.
+- **NRCan HRDEM (`canada`)**: Vancouver: the BC Lower Mainland 2016 LiDAR
+  project (1 m DSM + DTM) through the geo.ca STAC; one cloud-optimised GeoTIFF
+  per project and layer, read for the site window only.
+- **swisstopo (`switzerland`)**: swissSURFACE3D raster + swissALTI3D, 0.5 m, 1 km
+  COGs, asset names matched by regex (`_0.5_2056_<year>.tif`); Zurich tested.
+- **Local tiles (`tiles`)**: ELVIS orders for Sydney 2020, ACT 2020, Hobart 2024,
+  Derwent 2008 and Adelaide 2026 (LAZ + 1 m DEM tiles). The C1/C2/C3 suffix in
+  ELVIS file names is not a classification level: all of them carry class 6.
+  Older surveys write a user-defined CRS key (EPSG 32767) the LAS reader cannot
+  parse: `tiles_crs`.
 
 ## Independent re-probes
 

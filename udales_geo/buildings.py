@@ -16,7 +16,7 @@ import numpy as np
 
 from .common import Config, add_udgeom_to_path, world_to_sim_polygon, write_report
 from .footprints import load_footprints, footprint_stats
-from .heights import assign_heights
+from .heights import assign_heights_two_surfaces
 
 # Building heights are rounded to this [m]. LiDAR heights are continuous: two
 # neighbours 5 mm apart in height would get a 5 mm wall strip made of
@@ -283,7 +283,7 @@ def build_buildings(cfg: Config) -> dict:
     bcfg_resolved = dict(bcfg)
     if bcfg.get("las_dir"):
         bcfg_resolved["las_dir"] = str(cfg.resolve(bcfg["las_dir"]))
-    fph, h_stats = assign_heights(fps, bcfg_resolved)
+    fph, h_stats = assign_heights_two_surfaces(fps, bcfg_resolved)
     if not fph:
         raise ValueError("no footprints survived height assignment")
     fph = [(p, round(round(h / HEIGHT_STEP) * HEIGHT_STEP, 6), props) for p, h, props in fph]
