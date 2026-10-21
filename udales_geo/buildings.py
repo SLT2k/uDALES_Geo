@@ -71,17 +71,22 @@ def _hair_cracks(mesh, eps):
     return walls[surface > c[:, 2] + 1e-6]
 
 
-def _write_fills(path, fills, crs, kind, extra_gap_fills=()):
+def _write_fills(path, fills, crs, kind, extra_gap_fills=(), frame=None):
     """GeoJSON of fills (world CRS, with the legacy "crs" member QGIS reads, as
     in buildings_osm.geojson): properties height and kind ("gap" for gap
-    fills, also the sliver fills of the second pass, or "courtyard")."""
+    fills, also the sliver fills of the second pass, or "courtyard").
+    frame: the region.DomainFrame of a turned domain; the fills are turned
+    back to the world, so they lie on buildings_osm.geojson in QGIS."""
     import json
     from shapely.geometry import mapping
+
+    def world(p):
+        return p if frame is None else frame.to_world(p)
     code = str(crs).split(":")[-1]
     feats = [{"type": "Feature", "properties": {"height": h, "kind": kind},
-              "geometry": mapping(p)} for p, h, _ in fills]
+              "geometry": mapping(world(p))} for p, h, _ in fills]
     feats += [{"type": "Feature", "properties": {"height": h, "kind": "gap"},
-               "geometry": mapping(p)} for p, h, _ in extra_gap_fills]
+               "geometry": mapping(world(p))} for p, h, _ in extra_gap_fills]
     path.write_text(json.dumps({
         "type": "FeatureCollection",
         "crs": {"type": "name", "properties": {"name": f"urn:ogc:def:crs:EPSG::{code}"}},
@@ -277,6 +282,7 @@ def build_buildings(cfg: Config) -> dict:
         boundary_inset=float(bcfg.get("boundary_inset", 0.02)),
         min_area=float(bcfg.get("min_area", 0.0)),
         simplify_tolerance=float(bcfg.get("simplify_tolerance", 0.0)),
+        frame=bcfg.get("_frame"),       # turned domain: footprints into the domain frame
     )
     fp_stats = footprint_stats(fps)
 
@@ -325,7 +331,7 @@ def build_buildings(cfg: Config) -> dict:
         gap_stats["lambda_p_added"] = round(gap_stats["area_m2"] / (grid.xlen * grid.ylen), 4)
         gap_stats["remaining_narrow_m2"] = round(
             remaining_narrow_area(fph, cfg.bbox, width, snap, grid=(dx, dy), inset=inset), 2)
-        _write_fills(fills_path, fills, cfg.crs, "gap")
+        _write_fills(fills_path, fills, cfg.crs, "gap", frame=bcfg.get("_frame"))
         print(f"[gaps] filled {gap_stats['pieces']} gaps narrower than {width:g} m "
               f"({gap_stats['area_m2']:g} m2, lambda_p +{gap_stats['lambda_p_added']:g}) "
               f"-> {fills_path.name}")
@@ -361,7 +367,7 @@ def build_buildings(cfg: Config) -> dict:
         c = fit["courtyards"]
         c["second_pass_gap_fills"] = len(more)
         c["second_pass_area_m2"] = round(sum(p.area for p, _, _ in more), 1)
-        _write_fills(yards_path, yards, cfg.crs, "courtyard", more)
+        _write_fills(yards_path, yards, cfg.crs, "courtyard", more, frame=bcfg.get("_frame"))
         print(f"[grid] {c['before']['narrow_columns']} grid columns in narrow enclosed courtyards "
               f"-> {c['fills']} courtyard fills ({c['area_m2']:g} m2) + {len(more)} sliver fills "
               f"-> {yards_path.name}")

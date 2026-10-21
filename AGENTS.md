@@ -46,7 +46,11 @@ the grid, drops buildings the grid cannot see), meshes them into one
 connected 2.5D surface (roofs, walls and ground, open only along the domain
 edge), checks it with uDALES' own `udgeom` plus its own
 gates, and writes `geom.<expnr>.stl`. Optionally it finds individual trees in
-a canopy height map and writes uDALES vegetation files.
+a canopy height map and writes uDALES vegetation files. The domain is a
+north-up box from the two corners, or a turned one (new 2026-10-20): by hand
+(`domain`: centre, size, direction of the x axis) or found on the map from a
+reference building raster such as an UrbanTALES topography file (`align`,
+stage 3b; buildings only).
 
 Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 
@@ -58,7 +62,8 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `__main__.py` | command line: config path, `--force-fetch`, `--redo-trees`; a `ConfigError` exits with code 2 |
 | `build.py` | the pipeline driver `build_site`, `DEFAULTS` for the `buildings` section, grid suggestion, `overview.png`, `site.report.json` |
 | `common.py` | `load_jsonc`, `resolve_udales_tools`, `Config`/`Grid` dataclasses, `world_to_sim_polygon`, `ConfigError`, `write_report`; legacy `load_config` |
-| `region.py` | corners → projected domain box (`make_region`), `on_lattice`, `region_from_bbox`, `auto_utm` |
+| `region.py` | corners → projected domain box (`make_region`), `on_lattice`, `region_from_bbox`, `auto_utm`; turned domains: `DomainFrame`, `Region.frame`/`with_bbox`/`world_polygon`/`world_bounds`, `parse_placement`, `parse_domain`, `make_rotated_region`, `region_from_window`, `xazimuth`, `quarter_turn_frame`, `norm_deg` |
+| `align.py` | `align`: reference raster → turned domain (stage 3b): `parse_align`, `read_reference`, `check_p3d`, `fetch_boxes`, `register`, `judge`, `align_site`, `alignment.png`/`alignment.json` |
 | `osm.py` | Overpass download, relation ring assembly, courtyards to their outer ring, OSM height parsing, GeoJSON in the site CRS |
 | `edges.py` | `edge_buildings: "extend"`: keep edge buildings whole and grow the domain |
 | `tile.py` | `tile: [nx, ny]`: copies of the periodic tile after the heights (stage 8b) |
@@ -78,7 +83,7 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `case_check.py` | standalone, after udprep: #367 check on `solid_c.txt` (periodic per `BCxm`/`BCym`), unused facets, missing-flux lines from the case's logs; also holds `periodic_labels` and `level_components`, which `grid_fit.py` imports |
 | `facet_types.py` | standalone backend, not wired in: ground/roof/wall per STL triangle and the types file udprep reads |
 
-### Tests `tests/` (offline: no network, no uDALES clone; 204 cases)
+### Tests `tests/` (offline: no network, no uDALES clone; 324 cases)
 
 | file | covers |
 |---|---|
@@ -95,6 +100,9 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `test_grid_fit.py` | courtyard detection and filling (outline and cell routes, heights, sheds, towers, roof-height solid rule, wide courtyard behind an unresolved slit), unseen buildings, plugs only where enclosed and without cracks, separate dy, `on_lattice` rounding like GEOS |
 | `test_case_check.py` | cavity detection on synthetic IBM masks: x and y seams, wrap-padded block test, non-periodic boundaries; a `solid_c.txt` from another grid is exit code 2 |
 | `test_facet_types.py` | classes per triangle, the types file format and its line order (line n = triangle n) |
+| `test_domain_frame.py` | turned domains: frame round trip at UTM coordinates, the production convention (`translate(rotate(world, A, c), -w0)` → x_axis_deg = −A), `domain` boxes, `x_axis_deg` 0 = north-up, report keys, placement and `domain` key checks, vegetation refused before any download, `build_site` with `domain` (download box and record, `_frame`, report; stubbed), the frame through growth, lattice move and tile, `quarter_turn_frame` against pr/tile-rotate-round's matrices, edge rule and anchor in the domain frame, the advice of the `edge_max_extend_m` refusal, footprints turned and clipped, heights sampled in the world (nDSM warped onto the whole-metre site raster at 0, 30 and 61 deg; LAS), fill files on the map |
+| `test_align.py` | registration on synthetic L-shaped layouts: angle and window recovered for references cut at A = 0, 23, 337, 135 deg (both turning directions, window off the cell lattice), prominence, runner-up and the refinement range, a weak upside-down match refused and named, another place refused, a regular grid (warning when accepted by score, refused when by prominence, `max_ambiguity` 1 never refuses), the warn/refuse rules (with the au_can_v2 and ca_van_v3 numbers), re-registration on fewer footprints gives the same frame or is refused (production case 785), workers 1 = 2, workers in a script without a `__main__` guard stop with an error; reference formats and row order, bad references, the PALM `_p3d` check (dx, dy, nx, ny), every `align` and `frame` key check, angles below 360; `align_site` cache reuse, re-judging and every cache input, a symmetric site passing with a warning, the freeze block, the frozen-frame checks (md5 warning, score stop, empty window), a window outside the search square; `build_site` with `align` (search wiring, counts over the first tile, a frozen run keeps the download; stubbed) |
+| `conftest.py` | fixture `offline_build`: `build_site` with the download, the mesher (`build_buildings`), the uDALES tools lookup and `overview.png` stubbed |
 | `test_vegetation.py` | quadkeys, LAS CHM, segmentation, tree shapes, voxelization methods, crowns cut around buildings (cut, low roof, split crown, non-convex cells, nothing left, shared corner stays watertight after an STL round trip), building drops, file formats, `trees.geojson` and `trees_plan.geojson` I/O |
 
 ### Configs `configs/`
@@ -169,8 +177,9 @@ the folder's existence is checked, not that `udgeom` imports.
   any other error prints a Python traceback. The last lines of a successful
   run are `=== <name>: DONE ===` and a summary.
 - Progress is printed with stage prefixes: `[region]`, `[osm]`, `[build]`,
-  `[edges]`, `[lidar]`, `[heights]`, `[footprints]`, `[buildings]`, `[gaps]`,
-  `[grid]`, `[surface]`, `[vegetation]`, `[canopy]`, `[trees]`, `[report]`.
+  `[align]`, `[edges]`, `[lidar]`, `[heights]`, `[footprints]`,
+  `[buildings]`, `[gaps]`, `[grid]`, `[surface]`, `[vegetation]`, `[canopy]`,
+  `[trees]`, `[report]`.
 
 ### 2.3 Offline tests
 
@@ -178,7 +187,8 @@ the folder's existence is checked, not that `udgeom` imports.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-169 test cases (about 2 s), no network and no uDALES clone. The network sources
+324 test cases (about 30 s, most of it the registration tests), no
+network and no uDALES clone. The network sources
 (Overpass, LiDAR services, EA VOM, Meta CHM), `udgeom` and the udprep
 cross-check are exercised only by building real sites (§5.2).
 
@@ -240,6 +250,8 @@ Conventions:
 - **World frame**: the site's projected CRS, in metres (GeoJSON files,
   rasters). **Sim frame**: world minus the final domain's lower-left corner,
   ground at z = 0 (STL files, uDALES files, `buildings.footprints.json`).
+  A turned domain has a **domain frame** between the two (§4.1); for a
+  north-up domain it is the world frame.
 - `[x]` is the value used when a key is missing. Keys of the `"buildings"` and
   `"vegetation"` sections are written without the section name where that is
   clear.
@@ -249,9 +261,11 @@ Conventions:
 
 ```mermaid
 flowchart TD
-    CFG["1 Config and command line<br/>configs/name.jsonc"] --> DOM["2 Domain<br/>corners to UTM box, enlarged to multiples of snap_m"]
+    CFG["1 Config and command line<br/>configs/name.jsonc"] --> DOM["2 Domain<br/>corners to UTM box, enlarged to multiples of snap_m;<br/>or turned: domain by hand, align search square"]
     DOM --> OSM["3 OSM buildings<br/>buildings_osm.geojson + buildings_osm.fetch.json"]
     OSM --> EDGE{"4 edge_buildings"}
+    OSM -.->|"align only"| REG["3b Registration to the reference raster<br/>alignment.png + alignment.json"]
+    REG -.-> EDGE
     EDGE -->|"clip, default"| LAT
     EDGE -->|"extend"| GROW["keep edge buildings whole, grow the domain<br/>buildings_domain.geojson"]
     GROW --> LAT["5 Domain corner onto the 1 cm snap lattice"]
@@ -282,7 +296,11 @@ Stages 1–6 and 14–16 run in `build.py: build_site`; stages 7–13 in
 1. `load_jsonc` removes `//` and `/* */` comments (not inside quoted strings)
    and parses the rest as JSON. A syntax error is a `ConfigError` with the line
    number and a hint (write paths with `/`; a missing or extra comma or quote).
-2. `corners` must be present (`ConfigError` otherwise).
+2. Exactly one of `corners`, `domain` and `align` must be given (a null
+   value counts as absent; `ConfigError` otherwise). `domain` and `align` are
+   checked here, `align` reads its reference (stage 2), and a turned domain
+   (`align`, or `domain` with `x_axis_deg` ≠ 0) with vegetation on is a
+   `ConfigError`, all before any download.
 3. The uDALES tools are located (§2.1) before anything is downloaded.
 4. Output folder: `output_dir` (absolute, or relative to the config folder)
    [`../sites/<name>` relative to the config folder]; created if missing.
@@ -290,7 +308,9 @@ Stages 1–6 and 14–16 run in `build.py: build_site`; stages 7–13 in
 | top-level key | default | stage |
 |---|---|---|
 | `name` | config file name without extension | 1 |
-| `corners` | required, `[[lon, lat], [lon, lat]]` | 2 |
+| `corners` | required unless `domain` or `align`: `[[lon, lat], [lon, lat]]` | 2 |
+| `domain` | `null`; `{"centre": [lon, lat], "size_m": [xlen, ylen], "x_axis_deg": a}` (all three required) | 2 |
+| `align` | `null`; `{"reference": file, "near": [lon, lat], ...}`, keys and defaults in `align.DEFAULTS` | 2, 3b |
 | `crs` | `"auto"` (UTM zone of the midpoint) | 2 |
 | `snap_m` | 1.0 | 2, 4 |
 | `dx` | 2.0 (the grid's dx = xlen/itot, dy = ylen/jtot: equal to it when snap_m is a multiple of it) | 4, 10, 11, 14 |
@@ -330,18 +350,60 @@ Stages 1–6 and 14–16 run in `build.py: build_site`; stages 7–13 in
    the corner box: the domain never cuts into the framed area, and xlen, ylen
    divide by dx when `snap_m` is a multiple of dx.
 
+**Turned domains** (new 2026-10-20, `region.py`). The domain then has its own
+domain frame (§4.1): x along the domain's x axis, at `x_axis_deg`
+counter-clockwise from the projection's east, y 90° further, origin at the
+domain's lower-left corner. `Region.frame` (a `DomainFrame`: `x_axis_deg`,
+world origin `x0`, `y0`) carries it; `Region.bbox` and `raw_bbox` are in the
+domain frame, and so are the footprints and fills from stage 4 on. Every
+change of the box goes through `Region.with_bbox`, which keeps the frame
+(stage 4 growth, stage 5, stage 8b).
+
+- `domain` (`parse_domain`, `make_rotated_region`): `centre` checked like a
+  corner (range, lat-first hint), each side of `size_m` ≥ 50 m, `x_axis_deg`
+  a number (not a boolean), normalised to [0, 360). The size is enlarged to
+  multiples of `snap_m` round the centre. `x_axis_deg` 0 gives exactly the
+  north-up `Region` of that centred box (frame `None`; vegetation allowed).
+  Otherwise bbox = (0, 0, xlen, ylen) and the frame's origin is the box's
+  lower-left corner on the map. A wind from grid bearing B (of `crs`) blows
+  along +x for `x_axis_deg` = 270 − B; the true bearing of +x is reported
+  as `region.frame.xazimuth_deg` (uDALES' `&INPS xazimuth`).
+- `align` (`align.parse_align`): the reference is read now (stage 3b has the
+  details); the CRS is `crs`, `"auto"` = UTM zone of `near`. The domain is
+  known only after the download: stage 2 makes the search square, a square
+  of half-width `search_radius_m` [reference diagonal + 100 m] round `near`.
+
+Not to be confused with `rotate` of pr/tile-rotate-round (not merged yet): that
+turns the finished tile by a quarter about its corner after the heights (same
+buildings, same cut); `domain`/`align` decide which piece of the city is cut
+and how it lies under the grid. They compose: a quarter turn adds ±90° to
+`x_axis_deg` (`region.quarter_turn_frame` gives the frame of the turned tile;
+whoever merges second must rebuild the region with it, so that the fill
+GeoJSONs, `region.frame` and `xazimuth_deg` describe the turned tile).
+
 ### Stage 3. OSM buildings
 
 `build.py: build_site`, `osm.py: fetch, to_geojson, assemble_rings, _holes_per_outer, parse_height, fetch_buildings`
 
 **Reuse.** `buildings_osm.geojson` is reused when `buildings_osm.fetch.json`
 holds the same `{"crs", "bbox"}` (bbox rounded to 1 mm) as the stage 2 box,
-before stage 4 growth and stage 5's lattice move. Missing or different record
-→ the old file is copied to `buildings_osm.previous.geojson` and the buildings
-are downloaded again. `--force-fetch` always downloads (no backup). Hand edits
-therefore survive reruns as long as `corners`, `snap_m` and `crs` stay the
-same. The record lives in its own file because QGIS drops extra GeoJSON keys
-on save.
+before stage 4 growth and stage 5's lattice move. For a turned `domain` the
+box is the north-up world box round the turned rectangle
+(`Region.world_bounds()`), for `align` the search square. Missing or
+different record → the old file is copied to `buildings_osm.previous.geojson`
+and the buildings are downloaded again. `--force-fetch` always downloads (no
+backup). Hand edits therefore survive reruns as long as `corners`, `snap_m`
+and `crs` stay the same. The record lives in its own file because QGIS drops
+extra GeoJSON keys on save.
+
+A frozen `align` frame (stage 3b) keeps the download it was found with
+(`build._check_frozen_download`). Its download box is the search square
+recorded in the frame (`fetch_box`; without it the window's world box), so
+the record of the search matches as usual. A record of another box is
+accepted when it covers the window's world box, a file without a record is
+used as it is, and a record that does not cover the window is a
+`ConfigError` (nothing moved, nothing downloaded). Only `--force-fetch`
+downloads again (the recorded box, no backup).
 
 **Download.**
 
@@ -383,6 +445,154 @@ on save.
 corners pasted latitude first. An empty answer is not written to disk (no
 file, no record), so a rerun asks Overpass again.
 
+### Stage 3b. Registration to a reference raster (`align` only, new 2026-10-20)
+
+`build.py: build_site, _check_frozen_download`, `align.py: parse_align,
+read_reference, check_p3d, fetch_boxes, search_footprints, register, judge,
+plot_alignment, align_site, frame_from_rotation`; `region.py: region_from_window`
+
+A port of the author's production registration (`select_case/pipeline`
+`s4_align_clip_stl.py` steps 0–3 and the peak guard of `s3n_auto_heights.py`),
+generalised for cell size, row order, refinement, caching and reporting.
+
+**Reference** (`read_reference`, stage 1): `.npy`, `.csv`, or else a
+whitespace text matrix (the UrbanTALES/PALM `<name>_topo`: integer heights,
+0 = ground). A cell > 0 is building; the first row is the y = ylen edge
+(`first_row` [`"top"`], as PALM reads it; `"bottom"` flips it). Refused: not a
+2-D table of numbers, NaN, no building cell, no ground cell, a side under
+50 m (columns × `resolution_m` [1.0] by rows × `resolution_m`). A PALM
+`<name>_p3d` next to a `<name>_topo` must agree: `dx`/`dy` = `resolution_m`,
+nx + 1 = columns, ny + 1 = rows (UrbanTALES has 0.5 m and 1 m cases). The
+search memory is estimated (`memory_estimate_gb`, from two measurements, per
+worker; conservative: 1.6 GB estimated, 0.69 GB measured for a whole
+us_det_u5 build) and a search over `max_memory_gb` [8] is refused before any
+download. Time and memory per angle grow with (search side /
+`resolution_m`)²: a 0.5 m reference (five real UrbanTALES cases) costs about
+4 × the 1 m one of the same size (576 m at 0.5 m: about 5.6 GB estimated),
+and `mirror_check` doubles the coarse search.
+
+**Search** (`register`), in the world CRS round the pivot = `near` projected:
+
+1. Footprints: the downloaded features made valid, at least
+   `buildings.min_area`, touching the search square, clipped to it.
+2. For every angle A in 0, `angle_step_deg` [1.0], … < 360 (A = the
+   counter-clockwise turn of the map, the production convention): the
+   footprints are turned by A about the pivot and rasterised at
+   `resolution_m` on a lattice through the pivot covering the turned square
+   (so the image is never smaller than the reference and its pixel phase does
+   not depend on any far building); the score is the maximum of
+   `skimage.feature.match_template` (normalised cross-correlation) against the
+   reference, its position the window. With `mirror_check` [true] the same
+   images are matched against the reference upside down (twice the time).
+   A progress line is printed every eighth of the angles.
+3. Refinement (`refine_step_deg` [0.1]; 0 = off, integer degrees as in
+   production): the best angle ± k × step for k up to
+   ⌈½ `angle_step_deg` / step⌉ + 1 (the peak lies within half a coarse step
+   of the best coarse angle; one step more for a lopsided peak: 51
+   evaluations at the defaults), each with the raster also shifted by half a
+   cell in x, y and both; the best score wins (ties: the coarse angle). The
+   window corner is then accurate to about a quarter of a cell
+   (`window_step_m` = half a cell; whole cells without refinement).
+4. The frame: world → domain = turn by A about the pivot, then subtract the
+   window corner, so `x_axis_deg` = −A mod 360 (`frame_from_rotation`; angles
+   are kept in [0, 360) by `region.norm_deg`). The vector footprints are
+   turned with the formula that defines the frame, so there is one sign
+   convention (production turned a raster with scipy and tried both signs).
+
+`workers` [1] > 1 runs a `concurrent.futures.ProcessPoolExecutor` with the
+"spawn" start method; the results do not depend on it. Each worker starts by
+re-importing the script that called `build_site`, so such a script must keep
+its top level under `if __name__ == "__main__":` (the command line has it).
+Without it the workers fail at start and the search stops with a
+`RuntimeError` that says so (a `multiprocessing.Pool` started new workers
+forever and the run hung). A worker that runs out of memory stops the
+search the same way.
+
+**Acceptance** (`judge`, re-evaluated on every run, also from the cache):
+score ≥ `min_score` [0.5] (`accepted_by` `"score"`), or score ≥ 0.2
+(`PEAK_SCORE_FLOOR`) and prominence ≥ `min_prominence` [1.8] (`"peak"`);
+prominence = best / median of the step-2 scores (at least 90 % of the angles
+must be scored). Then three ambiguity ratios to the best score:
+
+- the runner-up angle (the best angle of another peak of the step-2 curve,
+  not on the slopes of this one and more than 5° away) and a second window
+  position (the best of the NCC map more than max(10 cells, 5 % of the
+  smaller side) away): above `max_ambiguity` [0.85] a `"peak"` match is
+  refused and a `"score"` match is kept with a warning; `max_ambiguity` ≥ 1
+  never refuses;
+- the reference upside down (`mirror_check`): above `max_ambiguity` a
+  warning only, whatever accepted the match, with the hint to try the other
+  `first_row` (above 1: "the reference is probably upside down").
+
+Also refused: a window reaching outside the search square (nothing was
+downloaded there: raise `search_radius_m` or move `near`). A refusal is a
+`ConfigError` naming the numbers, raised after `alignment.png` and
+`alignment.json` are written and before any LiDAR download; when a weak
+match is beaten by the upside-down reference, it names `first_row`.
+Warnings are printed between two lines of `!` right after the search,
+repeated in the summary at the end of the build (`WARNING   : [align] …`),
+written to `site.report.json` (`align.warnings`) and `alignment.json`
+(`judgement.warnings`), and drawn in red above `alignment.png` (the
+upside-down maximum is a red × on the score curve).
+
+**Why the upside-down check only warns** (the author's decision,
+2026-10-20). Measured on four production cases (UrbanTALES topo, the
+production footprint downloads, whole degrees):
+
+| case | score (accepted by) | runner-up | 2nd position | upside down |
+|---|---|---|---|---|
+| us_det_u5 | 0.738 (score) | 0.22 | 0.24 | 0.25 |
+| ca_van_v3 | 0.866 (score) | 0.41 | 0.46 | 0.43 |
+| fr_par_v2 | 0.727 (score) | 0.25 | 0.29 | 0.26 |
+| au_can_v2 | 0.910 (score) | 0.81 | 0.58 | 0.93 |
+
+au_can_v2 (Parliament House, Canberra) is left-right symmetric: its right
+match (the production angle, IoU 0.92 with the topo) scores 0.93 × as well
+upside down, so a refusal would reject it. The price: read with the wrong
+`first_row`, ca_van_v3 scores 0.371 with prominence 3.41, which the peak
+rule accepts; only the upside-down check sees that the right way up scores
+2.3 × better, and it now warns ("probably upside down") instead of
+refusing. The upside-down references of us_det_u5 (0.181, prominence 1.59)
+and fr_par_v2 (0.1925, 1.39) are refused by score and prominence anyway.
+
+**Domain** (`region_from_window`): bbox = (0, 0, W, H) of the reference
+window, far sides enlarged to multiples of `snap_m`, so the window corner (the
+domain-frame origin) and with it the reference cell lattice stay at (0, 0). A
+NOTE is printed unless `snap_m` is a multiple of both `dx` and
+`resolution_m` (only then do grid lines lie on reference cell edges).
+
+**Freeze.** `site.report.json` `align.freeze` (also printed) is an `align`
+value: `reference`, `resolution_m` and `first_row` when not the defaults, and
+`"frame": {"x_axis_deg", "origin", "crs", "window_score", "fetch_box",
+"footprints_md5"}`: the frame at full float precision plus what the search
+saw (the score of the window, computed as a frozen run computes it; the box
+it downloaded; the md5 of that download). Pasted into the config it gives
+the same frame and domain without a search; the search keys (`near`,
+`search_radius_m`, `angle_step_deg`, `refine_step_deg`, `min_prominence`,
+`max_ambiguity`, `mirror_check`, `workers`, `max_memory_gb`) are refused
+next to `frame`. A frozen run
+
+- keeps the download (stage 3); another md5 of the footprint file (a hand
+  edit, or OSM changed since a `--force-fetch`) is a warning only;
+- stops (`ConfigError`) when the window scores under 0.8 × the recorded
+  `window_score` (`FREEZE_MIN_SCORE_FRACTION`): a frame pasted into another
+  site's config, with another `crs`, or footprints that changed a lot.
+  Delete `window_score` from the frame to build anyway; a frame without it
+  only gets a warning under `min_score`. No footprint in the window is
+  refused.
+
+Files: `alignment.png` (score against `x_axis_deg` with the chosen angle, the
+runner-up, the upside-down maximum, the thresholds and the upside-down curve;
+the window with reference only red, footprints only blue, both black and the
+IoU; the map with the domain, its +x arrow, the search square and `near`, or
+the window centre for a frozen frame; warnings and refusal reasons in red
+above), `alignment.json` (cache and the last judgement, §4.9), and
+`site.report.json` `align` (stage 16). Search time on one core: 0.3–0.7 s
+per angle for 384–576 m references (us_det_u5, 384 × 432 m, 1° steps with
+`mirror_check` and refinement: about 6 min for the whole build; 158 s with 2
+workers and refinement off), about 3 s per angle for a 1 km reference. The
+library does not lower its own priority (Windows: `start /low`).
+
 ### Stage 4. Buildings on the domain edge
 
 `edges.py: apply_edge_policy`, `region.py: region_from_bbox`
@@ -408,7 +618,16 @@ is a `ConfigError`. For each downloaded feature (made valid first):
 
 Buildings lying only in the grown strip are not added (otherwise growth would
 chain along a terrace). Each axis is then lengthened to a multiple of
-`snap_m`, the extra split over both sides. Every kept building ends up at
+`snap_m`, the extra split over both sides; with `align` (`anchor` = the window
+corner) each side is instead moved outward on its own to the next multiple of
+`snap_m` from the window corner, so with `snap_m` 1 the sides stay on whole
+reference cells (`lattice_anchor` in the report).
+
+Turned domain: the rule runs in the domain frame. Each feature is turned into
+it (`frame.to_domain`) to be tested and measured; the kept features are the
+original world features, so `buildings_domain.geojson` stays a world file. The
+report's `west/south/east/north` are then the −x/−y/+x/+y sides
+(`growth_sides` says so). Every kept building ends up at
 least `edge_clearance_m` from every edge (minus up to 5 mm from stage 5), so
 across the periodic seam buildings are ≥ 2 × clearance apart.
 
@@ -430,7 +649,8 @@ differs by one float ulp for about 13 % of coordinates, enough to hide a
 cell centre from the plug step (11g). Everything after this uses the moved
 box, so the sim-frame lattice and the world-frame lattice are the same
 lattice. Why this matters is in §4.2; without it, hair cracks opened between
-gap fills and buildings.
+gap fills and buildings. For a turned domain the rounding is in the domain
+frame, where the footprints are snapped (stage 9); `with_bbox` keeps the frame.
 
 The `trees.geojson` and `chm.tif` cache checks accept a recorded box within
 0.011 m of the current one (stage 15a), so this move does not throw away
@@ -443,8 +663,14 @@ affected (it records the stage 2 box).
 
 Runs when `height_source` [`"auto"`] is `"auto"` or `"lidar"` and `las_dir`
 is not set; any other `height_source` is a `ConfigError`. Raster: 1 m,
-north-up, over the final domain (`canopy.SiteRaster`). Source, first that
-applies:
+north-up, over the final domain (`canopy.SiteRaster`); for a turned domain over
+the north-up world box round it, enlarged to whole metres
+(`Region.world_bounds(snap=1.0)`), so the pixel lattice is the same at every
+angle. Rasters are never turned: the source is warped once onto this north-up
+grid, as for a north-up domain, and stage 8 samples it with the footprints
+turned back. Coverage (`coverage_of_site`, the 50 % rule of `"auto"`) is
+measured over that box, which is up to twice the domain area at 45° (§7.3).
+Source, first that applies:
 
 1. `dsm_file` + `dtm_file` (both required, else `ConfigError`; any CRS; same
    vertical datum): warped onto the raster (error if a file misses the
@@ -505,7 +731,9 @@ Input: `buildings_osm.geojson` (clip) or `buildings_domain.geojson` (extend),
 taken to be in the site CRS (`source_crs` is forced, no reprojection; hand
 edits must be saved in that CRS). For each feature:
 
-1. `make_valid`; z coordinates dropped.
+1. `make_valid`; z coordinates dropped; for a turned domain turned into the
+   domain frame (`bcfg["_frame"]`, set by `build_site` from the final region
+   and checked to be there when the placement is turned).
 2. Intersect with the domain box shrunk by `boundary_inset` [0.02 m], so no
    wall lies on the domain edge. Nothing left → dropped.
 3. Split into polygons; points and lines from clipping dropped.
@@ -570,7 +798,10 @@ case-insensitively), if a positive finite number.
 A footprint LiDAR sees as flat is taken to be demolished or not yet built at
 survey time; only an OSM height (possibly newer than the survey) keeps it.
 Where both values exist, LiDAR − OSM goes into the report (`lidar_minus_osm_m`:
-n, median, median absolute; +3.77 m median in South Kensington). No footprint
+n, median, median absolute; +3.77 m median in South Kensington). Turned
+domain: the footprints are turned back to the world for `_raster_heights` and
+`_las_heights` only; the output keeps the caller's own polygon objects
+(`assign_heights_two_surfaces` matches footprints by `id()`). No footprint
 left → `ValueError` "no footprints survived height assignment". The legacy
 `las_dir` route is in §3.17.
 
@@ -609,6 +840,9 @@ Rules:
   are (§4.2).
 - `las_dir` heights (§3.17) are assigned per footprint before the copies are
   made, so the copies get them too.
+- Turned domain: copies run along the domain axes (what a periodic tile
+  needs); `build_site` reads the tiled box back with `Region.with_bbox`, which
+  keeps the frame.
 
 Report: `tile` in `site.report.json` (`copies`, `tile_m`,
 `footprints_per_tile`; `null` when not tiled). `buildings.n_buildings`, the
@@ -1317,7 +1551,9 @@ uDALES files) and, after the no-cells case, `trees_without_cells`.
 `overview.png`: footprints and fills (from `buildings.footprints.json`)
 coloured by height, the cut crown outlines (from `trees_plan.geojson`; none
 when the run has no trees), the
-framed box dashed if stage 4 grew the domain (any side grew).
+framed box dashed if stage 4 grew the domain (any side grew). A turned domain
+gets a third title line (`x axis … deg from east (grid bearing …), xazimuth
+…`) and an "N (grid)" arrow.
 `site.report.json` (deleted before the buildings stage runs, written last): `name`,
 `region`, `edge_buildings`, `building_heights`, `fetch`, `buildings` (subset:
 output_stl, valid, issues, n_faces, n_buildings, ground_missing_pct,
@@ -1327,10 +1563,42 @@ min_face_area_m2, heights — the hair-crack keys are only in
 `udales_tools`. The printed summary has one line each for domain, buildings,
 heights, gaps, courtyards, STL, trees, grid and the `udales/` path.
 
+Turned domains only (a north-up run writes none of these, byte for byte as
+before):
+
+- `region.frame`: `x_axis_deg`, `x_axis_grid_bearing_deg` (90 − x_axis_deg),
+  `xazimuth_deg` (true bearing of +x at the centre, pyproj geodesic: uDALES'
+  `&INPS xazimuth`; a north-up domain in South Kensington gives 92.21),
+  `origin_world` (full precision), `corners_world` and `corners_lonlat` of the
+  final domain in the order (0, 0), (xlen, 0), (xlen, ylen), (0, ylen) of the
+  sim frame, `world_bounds`, and the conversion formula. **Report-format
+  note**: `region.bbox` and `raw_bbox` are then in the domain frame, not in the
+  CRS; a reader that maps them to world coordinates must check for
+  `region.frame`.
+- `align` (after `region`): reference, cells, `resolution_m`, `first_row`,
+  `mode` `"search"`, `near_lonlat`, `search_box`, `footprints_used`, steps,
+  `x_axis_deg`, `coarse` (angle and score of step 2), `score`,
+  `window_score`, `prominence`, `runner_up`, `second_position` and `mirror`
+  (each with score and `ratio` to the best), `iou_in_window`, `accepted_by`,
+  `warnings` (a list; also repeated in the printed summary after the domain
+  line), the thresholds, `window_step_m`, `world_to_domain`
+  (`rotate_ccw_deg`, `pivot`, `window_origin_rotated`: the production
+  convention; compare with production through the corner positions, since
+  the pivot differs), `freeze`, `files`. With a given `frame`: `mode`
+  `"frame"`, `x_axis_deg`, `score` (of the window), `recorded_window_score`,
+  `iou_in_window`, `footprints_md5`, `warnings`, `files`.
+- `fetch` with `align`: `n_buildings` and the height-tag counts are over the
+  features touching the final domain before tiling (the copies are not on
+  the map); `n_in_search_square` counts the download.
+- `region.frame.first_tile` (turned and tiled): bbox and corners of the real
+  site; the corners above it include the copies.
+
 ### 3.17 Non-default and legacy options
 
 - `edge_buildings: "extend"` — stage 4; used by all five configs.
 - `tile: [nx, ny]` — stage 8b: copies of the periodic tile, buildings only.
+- `domain` / `align` — stage 2 / 3b: a turned domain, by hand or matched to a
+  reference raster; buildings only.
 - `buildings.height_source: "osm"` — no LiDAR download; OSM height, else
   `default_height` (`las_dir` is still used if set).
 - `buildings.height_source: "lidar"` — as `"auto"`, but stop without LiDAR.
@@ -1379,6 +1647,7 @@ All in `sites/<name>/` unless noted.
 | `buildings_osm.fetch.json` | 3 | the tool (was the download made for this box?) |
 | `buildings_osm.previous.geojson` | 3 | you (the old download after the box changed) |
 | `buildings_domain.geojson` | 4, extend only | the tool (stage 7, same run); you |
+| `alignment.png`, `alignment.json` | 3b, `align` only | you (the registration); the tool (cache, §4.9) |
 | `cache/` (LiDAR tiles in `cache/lidar/`, EA canopy zips) | 6, 15b | the tool on later runs |
 | `ndsm.tif`, `heights.provenance.json` | 6 | you |
 | `gap_fills.geojson` | 10 | you (QGIS; legacy `crs` member; properties `height`, `kind` `"gap"`) |
@@ -1411,6 +1680,19 @@ GeoJSON files and rasters are in the world frame; STLs,
 `buildings.footprints.json` and the uDALES files in the sim frame.
 `world_to_sim_polygon` is the only translation; do not translate by any other
 corner.
+
+Turned domains (`Region.frame`, a `region.DomainFrame`) add a **domain frame**:
+x along the domain's x axis (`x_axis_deg` counter-clockwise from the CRS's
+east), y 90° further, origin at the frame's world point (x0, y0):
+x_w = x0 + x cos a − y sin a, y_w = y0 + x sin a + y cos a. `Region.bbox`, the
+footprints from stage 7 on, every fill and the snap lattice are in it, and
+sim = domain frame − bbox corner (the same `world_to_sim_polygon`). Vectors
+are turned world → domain in two places only (stage 4 edge rule, stage 7
+loading) and domain → world in three (stage 8 sampling, the fill GeoJSONs,
+the report corners); rasters are never turned. `DomainFrame` subtracts the
+large origin before rotating (round trip < 1e-9 m at UTM coordinates) and
+is exact for quarter turns. For a north-up domain `frame` is `None` and every
+code path is the old one.
 
 ### 4.2 The snap lattice, and why the domain corner must be on it
 
@@ -1458,7 +1740,9 @@ whole chain.
 Rules that follow:
 
 - Do not move or resize the domain after `on_lattice` (any new domain logic
-  goes before it in `build_site`). The one exception is tiling (stage 8b),
+  goes before it in `build_site`; change the box with `Region.with_bbox`,
+  never with `region_from_bbox` alone, or a turned domain loses its frame).
+  The one exception is tiling (stage 8b),
   which appends whole copies east and north: the corner does not move, and
   the offsets are multiples of `snap_m`.
 - Any new geometry step between stage 9 and meshing must produce lattice
@@ -1561,8 +1845,9 @@ loudly.
 New keys: a `buildings` key gets its default in `build.DEFAULTS`, a
 `vegetation` key in `vegetation.DEFAULTS`, a top-level key as an inline
 `site.get(key, default)` in `build_site` (`build.DEFAULTS` is merged only into
-the `buildings` section); plus one commented line in `configs/example.jsonc`
-saying the default (the file marks the owner's non-default choices with
+the `buildings` section), an `align` key in `align.DEFAULTS` (the `domain`
+keys have no defaults: all three are required); plus one commented line in
+`configs/example.jsonc` saying the default (the file marks the owner's non-default choices with
 "(example; default …)"). Older `buildings` keys still have their fallback
 inline where they are read, not in `DEFAULTS`: `snap_precision` 0.01,
 `overlap_min_part_area` 1.0, `max_plausible_height` 300, `height_percentile`
@@ -1572,7 +1857,7 @@ inline where they are read, not in `DEFAULTS`: `snap_precision` 0.01,
 fallbacks in `buildings.py` and `heights.py` differ from `DEFAULTS`
 (`min_area` 0.0, `min_height` 0.0, `partition_grid_m` 25.0) but are never
 reached from `build_site`, because `DEFAULTS` is merged first. Private runtime values use a leading underscore
-(`_ndsm`, `_ndsm_building`, `_ndsm_point_cloud`, `_lidar_values`, `_dz`).
+(`_ndsm`, `_ndsm_building`, `_ndsm_point_cloud`, `_lidar_values`, `_dz`, `_frame`).
 
 ### 4.9 Caches and their records
 
@@ -1581,6 +1866,7 @@ reached from `build_site`, because `DEFAULTS` is merged first. Private runtime v
 | `buildings_osm.geojson` | `buildings_osm.fetch.json` `{crs, bbox}` (stage 2 box) | record matches | record missing/different (old file → `.previous`), `--force-fetch` |
 | `trees.geojson` | `canopy.provenance.json` `domain_bbox` (final box) | record within 0.011 m, no flag | record missing/different (old file → `.previous`), `--redo-trees`, `--force-fetch` |
 | `chm.tif` | `canopy.provenance.json` `domain_bbox` (within 0.011 m), `chm_res_m` | only if `trees.geojson` is missing and no flag | otherwise |
+| `alignment.json` (`align`) | its `inputs`: `ALIGN_VERSION`, reference path, md5 and cells, `resolution_m`, `first_row`, CRS, search square, `angle_step_deg`, `refine_step_deg`, `mirror_check`, `buildings.min_area`, md5 of the footprint file | inputs match (acceptance is re-judged from the stored result, so `min_score`, `min_prominence`, `max_ambiguity`, `workers` do not search again; every run rewrites its `judgement`: accepted_by, refusal reasons, warnings, ratios) | any input changed (a hand edit or `--force-fetch` changes the footprint md5) |
 | LiDAR tiles `cache/lidar/<source>/` | file name = layer + box in the source CRS | always | never (delete by hand) |
 | EA zips in `cache/` | file name = tile label | always | never |
 
@@ -1653,7 +1939,10 @@ are in the repository:
   `site.report.json`, the STL from `udales/geom.<expnr>.stl`, namelist and
   `factypes.inp.201` from uDALES `examples/201`, `nprocx = nprocy = 1`,
   `nompthreads = 1`; lEB on with `lvfsparse = .true.` unless `--ibm-only`
-  (then `lEB = .false.`). The case goes to `<cases_root>/<expnr>`.
+  (then `lEB = .false.`). The case goes to `<cases_root>/<expnr>`. It takes
+  the namelist of `examples/201` as it is: for a turned domain
+  (`region.frame` in `site.report.json`) pass
+  `"xazimuth = <region.frame.xazimuth_deg>"` as an extra `&INPS` line.
 - `tools/udprep_check/run_udprep.py <case_dir> [--force]` runs udprep with
   the legacy IBM backend inside the case folder and prints the IBM output;
   redirect it to `<case>/write_inputs.<expnr>.log`. It does not write
@@ -2125,6 +2414,8 @@ Do not just drop a hand-made file into `sites/<name>/` as
 - `xazimuth` (`&INPS`): the tool's UTM grid is rotated about 2.2° from true
   north in London (92.21 South Kensington, 92.19 Earl's Court); the default
   90 turns the sun by that much. The tool writes no energy-balance namelist.
+  A turned domain (`domain`, `align`) reports the value to use as
+  `region.frame.xazimuth_deg` in `site.report.json`.
 
 ### 7.3 Smaller known gaps (in the code today)
 
@@ -2139,6 +2430,19 @@ Do not just drop a hand-made file into `sites/<name>/` as
   inverted wall (stage 12); nothing uses it.
 - `ndsm.tif` and `heights.provenance.json` stay when a later run uses no
   LiDAR.
+- Turned domains (`domain`, `align`) are buildings only: vegetation is
+  refused (the CHM, the crowns, `trees.geojson`, the tree caches and
+  `voxelize` would all need the domain frame and their own udprep check).
+- Turned domains: the nDSM and its coverage (`MIN_COVERAGE` of
+  `lidar_source "auto"`) cover the north-up box round the domain, up to twice
+  its area at 45°; a LiDAR source covering the domain but not the box corners
+  can be rejected.
+- `align`: GeoTIFF/netCDF references, heights from the reference raster, the
+  production pipeline's "topo mode" (the reference's own polygons as
+  footprints) and its "drop crossing buildings whole" edge mode are not
+  ported.
+- `xazimuth_deg` is reported for turned domains only (adding it to north-up
+  reports would change their bytes).
 - Orphan zips `cache/lidar_composite_*.zip` (about 130 MB per folder) from an
   older code version sit in `sites/compare_heights_osm` and
   `sites/compare_heights_lidar`.

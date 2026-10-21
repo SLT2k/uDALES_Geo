@@ -178,16 +178,21 @@ def assign_heights(footprints, bcfg: dict) -> tuple[list, dict]:
     Priority: LiDAR (point cloud las_dir, or nDSM from DSM/DTM) > height attribute
     (OSM) > default_height. LiDAR above max_plausible_height falls back to the
     attribute; LiDAR below min_height falls back to the attribute only — with
-    no attribute the footprint is left out, not given default_height."""
+    no attribute the footprint is left out, not given default_height.
+    Turned domain (bcfg["_frame"], region.DomainFrame): the footprints are in
+    the domain frame, the nDSM and point clouds in the world frame; turned
+    copies sample them, and the output keeps the caller's own polygons."""
     attr = bcfg.get("height_attribute")
     default_h = bcfg.get("default_height")
     min_h = float(bcfg.get("min_height", 0.0))
     max_h = float(bcfg.get("max_plausible_height", 300.0))
 
+    frame = bcfg.get("_frame")
+    sample = footprints if frame is None else [(frame.to_world(p), pr) for p, pr in footprints]
     if bcfg.get("las_dir"):
-        las_heights = _las_heights(footprints, bcfg)
+        las_heights = _las_heights(sample, bcfg)
     elif bcfg.get("_ndsm") is not None:
-        las_heights = _raster_heights(footprints, bcfg)
+        las_heights = _raster_heights(sample, bcfg)
     else:
         las_heights = None
     if bcfg.get("_lidar_values") is not None:    # one value per footprint, chosen by assign_heights_two_surfaces

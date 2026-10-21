@@ -24,11 +24,69 @@
                                                   //   (or delete and set the UDALES_TOOLS environment variable)
   "output_dir": null,              // null = sites/<name>/ next to the configs folder
 
+  // ======================== turned domain (optional) ========================
+  // "corners" above give a north-up box. For a domain turned on the map, replace "corners"
+  // by ONE of the two keys below (give only one of "corners", "domain" and "align"). The
+  // domain's x axis is the uDALES x axis (the direction the wind is driven). Turned domains
+  // are buildings only: they need vegetation off (except "x_axis_deg": 0).
+  "domain": null,                  // a turned box by hand, e.g. {"centre": [-74.00559, 40.73342],
+                                   //   "size_m": [400, 300], "x_axis_deg": 30}:
+                                   //   centre     = [longitude, latitude] of the domain centre
+                                   //   size_m     = [xlen, ylen] [m], enlarged to multiples of snap_m
+                                   //   x_axis_deg = where the x axis points, degrees counter-clockwise
+                                   //                from east of the map projection ("crs"); 0 = north-up.
+                                   //                A wind FROM grid bearing B (of "crs") blows along +x
+                                   //                for x_axis_deg = 270 - B; the true direction of +x
+                                   //                is xazimuth_deg in site.report.json (region.frame)
+  "align": null,                   // the box found by matching a building raster of the same place,
+                                   //   e.g. an UrbanTALES topo file: {"reference": "C:/data/US-Det-U5_d00_topo",
+                                   //   "near": [-83.08862, 42.34026]}. Keys (default after "="):
+                                   //   reference       = required: text matrix (one line per row), .csv
+                                   //                     or .npy; a cell > 0 is building; its size
+                                   //                     gives xlen x ylen (a PALM <name>_p3d next to
+                                   //                     a <name>_topo is checked: dx, nx, ny)
+                                   //   near            = required: [longitude, latitude] of a point in or near
+                                   //                     the domain (UrbanTALES metadata: one of its corners)
+                                   //   resolution_m    = 1.0: size of one reference cell [m] (UrbanTALES: 0.5 or 1)
+                                   //   first_row       = "top": the first row is the y = ylen edge (PALM,
+                                   //                     UrbanTALES); "bottom": the first row is y = 0
+                                   //   search_radius_m = null: half-width of the square searched round "near"
+                                   //                     [m]; null = reference diagonal + 100 m
+                                   //   angle_step_deg  = 1.0: angles tried, 0 to 360 in this step ...
+                                   //   refine_step_deg = 0.1: ... then round the best one in this step,
+                                   //                     also half a cell shifted (0 = off)
+                                   //   min_score       = 0.5: accept a match score (0-1) this high, or one of at
+                                   //                     least 0.2 ...
+                                   //   min_prominence  = 1.8: ... whose peak is this many times the median score
+                                   //   max_ambiguity   = 0.85: another angle or window position scoring this fraction
+                                   //                     of the best: refused when the match passed by min_prominence
+                                   //                     only, a warning when it passed min_score (1 or more: never
+                                   //                     refused); the raster upside down scoring that much: a warning
+                                   //                     only (symmetric sites do it too; a wrong first_row then passes
+                                   //                     with the warning: read it and look at alignment.png)
+                                   //   mirror_check    = true: also search with the raster upside down (doubles
+                                   //                     the search time; names a wrong first_row)
+                                   //   workers         = 1: processes for the search; each needs about 2 GB for a
+                                   //                     400 m reference and 4-5 GB for a 1 km one (time and memory
+                                   //                     grow with (search side / resolution_m)^2: 0.5 m costs about
+                                   //                     4 x). A script calling build_site with workers > 1 needs
+                                   //                     `if __name__ == "__main__":` (the command line has it)
+                                   //   max_memory_gb   = 8: refuse a search estimated to need more (all workers)
+                                   //   frame           = null: {"x_axis_deg", "origin", "crs", ...} = use this frame
+                                   //                     without searching ("near" and the other search keys left
+                                   //                     out); a run prints it and writes it to site.report.json as
+                                   //                     align.freeze, with the window score, download box and md5 of
+                                   //                     that search: the run keeps that download and stops if the
+                                   //                     window scores far below the recorded score
+                                   //   The search result is in sites/<name>/alignment.png and alignment.json
+                                   //   (reused while reference, footprints and search keys stay the same)
+
   // ======================== buildings on the domain edge ========================
   "edge_buildings": "extend",      // (example; default "clip")
                                    // "clip"   = cut buildings at the edge (inflow/outflow domains)
                                    // "extend" = PERIODIC domains: keep edge buildings whole and grow
-                                   //            the domain outward slightly to fit them
+                                   //            the domain outward slightly to fit them (with "align"
+                                   //            each side grows to whole snap_m from the window corner)
   "edge_min_inside": 0.5,          // extend: an edge building is kept if at least this fraction of it
                                    //   lies inside your box, otherwise removed whole (0 = keep all)
   "edge_clearance_m": null,        // extend: open ground between buildings and the edge [m]; null = dx

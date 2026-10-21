@@ -24,6 +24,9 @@ Where the project stands: [docs/PROGRESS.md](docs/PROGRESS.md).
   crash an energy-balance run are left.
 - **Periodic domains**: buildings on the domain edge kept whole, and copies
   of the tile when the flow needs a larger domain.
+- **Turned domains** (buildings only): the grid's x axis at any angle on the
+  map, given by hand or found automatically by matching a building raster of
+  the same place (e.g. an UrbanTALES topography file).
 - **Trees** (optional) from LiDAR or a worldwide canopy map, cut around the
   buildings, written as uDALES vegetation files.
 
@@ -79,7 +82,7 @@ rebuilds the trees (both overwrite hand-edited files).
 
 ```mermaid
 flowchart TD
-    CFG["Config: two corners, dx"] --> DOM["Domain: UTM box, multiple of snap_m"]
+    CFG["Config: two corners, dx"] --> DOM["Domain: UTM box, multiple of snap_m;<br/>or turned: by hand, or matched to a reference raster"]
     DOM --> OSM["OSM building footprints"]
     OSM --> EDGE["Edge buildings: cut, or kept whole"]
     EDGE --> HGT["Heights: LiDAR, else OSM, else 10 m"]
@@ -95,7 +98,8 @@ flowchart TD
 
 1. **Domain** — the corners are projected to their UTM zone; the box is enlarged
    (never shrunk) to a multiple of `snap_m` — set it to `dx` (or n × `dx`) so
-   the domain is whole grid cells.
+   the domain is whole grid cells. A turned domain lies at an angle on the
+   map: everything below then works along its own axes.
 2. **Buildings** — footprints and height tags from OpenStreetMap.
 3. **Edge buildings** — cut at the domain edge, or (`"extend"`, for periodic
    domains) kept whole with the domain grown to fit.
@@ -160,7 +164,9 @@ flowchart TD
    divide `jtot` and `ktot`. With `snap_m` = n × dx, `itot` and `jtot` are
    multiples of n; with `zsize` a multiple of n × dz, so is `ktot`.
 7. **Energy-balance runs**: set `nfaclyrs` explicitly, `lvfsparse = .true.`,
-   and `bldT`, `flrT`, `skyLW` (they default to 0). All facets get type 1
+   and `bldT`, `flrT`, `skyLW` (they default to 0). For a turned domain set
+   `xazimuth` in `&INPS` to `region.frame.xazimuth_deg` from
+   `site.report.json`. All facets get type 1
    (one material) unless you supply a facet-types file; a starting point is
    `python -m udales_geo.facet_types` (see AGENTS.md — not yet part of the
    normal run).
@@ -179,6 +185,24 @@ flowchart TD
 - **Periodic domains** (`"edge_buildings": "extend"`): an edge building is kept
   whole if at least half of it lies in your box, otherwise removed whole; the
   domain grows to fit with one cell of open ground at each edge.
+- **Turned domains** (instead of `"corners"`, buildings only):
+  `"domain": {"centre": [lon, lat], "size_m": [400, 300], "x_axis_deg": 30}`
+  puts the grid's x axis (the wind direction) 30° counter-clockwise from east;
+  `"align": {"reference": "<UrbanTALES _topo file>", "near": [lon, lat]}`
+  finds the place, angle and window of a building raster among the OSM
+  footprints (angle search + window match, refused when the match is weak,
+  or ambiguous and accepted by its peak prominence only; `alignment.png`
+  shows it). A reference that also fits upside down only gives a WARNING,
+  never a refusal: nearly symmetric sites (e.g. Canberra's Parliament House)
+  score almost as well upside down with the right match, so a refusal would
+  reject them; the price is that a reference read with the wrong `first_row`
+  can pass with that warning, so read the warnings (printed, in
+  `site.report.json` and on `alignment.png`). `site.report.json` gives the
+  true direction of x (`region.frame.xazimuth_deg`, uDALES' `xazimuth`) and,
+  for `align`, a `freeze` block that repeats the domain without searching
+  and keeps the download it was found with. A script that calls
+  `build_site` with `"workers"` > 1 needs an `if __name__ == "__main__":`
+  guard (the command line has one).
 - **Copies of the tile** (`"tile": [2, 1]`): the finished periodic tile is
   repeated nx × ny times (buildings only, after the heights): the same
   morphology in a domain large enough for the flow (convective rolls span
@@ -208,9 +232,9 @@ In `sites/<name>/` (not tracked by git):
 | | files |
 |---|---|
 | **for uDALES** | `udales/geom.<expnr>.stl`; with trees `veg.inp.<expnr>`, `veg_params.inp.<expnr>`, `namoptions.trees.<expnr>`, `trees.<expnr>.stl` |
-| **to look at** | `overview.png`, `site.report.json`, `buildings.report.json`, `gap_fills.geojson`, `courtyard_fills.geojson`, `trees_plan.geojson`, `ndsm.tif`, `chm.tif` |
+| **to look at** | `overview.png`, `site.report.json`, `buildings.report.json`, `gap_fills.geojson`, `courtyard_fills.geojson`, `trees_plan.geojson`, `ndsm.tif`, `chm.tif`, `alignment.png` (`align`) |
 | **to edit** | `buildings_osm.geojson`, `trees.geojson` |
-| **bookkeeping** | `buildings_osm.fetch.json`, `*.provenance.json`, `buildings_domain.geojson`, `buildings.footprints.json`, `buildings.stl`, `trees.stl`, `vegetation.report.json`, `*.previous.geojson`, `cache/` |
+| **bookkeeping** | `buildings_osm.fetch.json`, `*.provenance.json`, `buildings_domain.geojson`, `buildings.footprints.json`, `buildings.stl`, `trees.stl`, `vegetation.report.json`, `*.previous.geojson`, `cache/`, `alignment.json` (`align`) |
 
 Every file explained: [AGENTS.md](AGENTS.md).
 
