@@ -82,13 +82,16 @@ def load_footprints(path: str | Path,
                     boundary_inset: float = 0.0,
                     min_area: float = 0.0,
                     simplify_tolerance: float = 0.0,
-                    quiet: bool = False):
+                    quiet: bool = False,
+                    frame=None):
     """Return list of (Polygon, properties) in target_crs, clipped to bbox.
 
     bbox = (xmin, ymin, xmax, ymax) in target_crs. The clip window is inset by
     `boundary_inset` so no clipped wall ends up exactly flush with the domain
     boundary (udgeom.add_ground's constrained triangulation fails on flush
     walls; verified on the AU-Syd case). quiet: no summary line.
+    frame: a region.DomainFrame (turned domain): each footprint is turned into
+    that domain frame, where bbox and the returned polygons then are.
     """
     path = Path(path)
     src_crs = source_crs or _detect_crs(path) or target_crs
@@ -114,6 +117,8 @@ def load_footprints(path: str | Path,
         if transform is not None:
             geom = transform(geom)
         geom = shapely.force_2d(make_valid(geom))  # 3D exports are common (QGIS "include Z")
+        if frame is not None:
+            geom = frame.to_domain(geom)
         if clip is not None:
             geom = geom.intersection(clip)
         if geom.is_empty:
