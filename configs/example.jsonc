@@ -54,16 +54,30 @@
 
     // --- building heights from LiDAR (priority: LiDAR > OSM height > default_height) ---
     "height_source": "auto",       // "auto"  = LiDAR where available (your files below, or automatic in
-                                   //           England, Netherlands, Flanders/Brussels, France), else OSM
+                                   //           England, Netherlands, Flanders/Brussels, France,
+                                   //           Switzerland, Canada, United States), else OSM
                                    // "lidar" = LiDAR required (stop if none); "osm" = never use LiDAR
     "lidar_source": "auto",        // automatic download: "auto" picks by location, or force one of
-                                   //   "england", "netherlands", "flanders" (incl. Brussels), "france"
-                                   //   ("england_tiles" = same data as 5 km zips, backup route)
+                                   //   "england", "netherlands", "flanders" (incl. Brussels), "france",
+                                   //   "canada", "switzerland", "usgs3dep" (United States, point clouds);
+                                   //   ("england_tiles" = same data as 5 km zips, backup route);
+                                   //   "tiles" = your own LAS/LAZ tiles (tiles_dir below)
+    "tiles_dir": null,             // lidar_source "tiles": folder of the tiles (an ELVIS order, ...)
+    "tiles_laz": null,             //   glob patterns of the point-cloud files, e.g. ["Sydney2020*.laz"]
+    "tiles_dem": null,             //   glob patterns of DEM GeoTIFFs used as the DTM (else class-2 returns)
+    "tiles_crs": null,             //   CRS of tiles whose LAS header carries no readable one, e.g. "EPSG:28355"
     "dsm_file": null,              // your own surface-height GeoTIFF (roofs included), any projection ...
     "dtm_file": null,              //   ... plus the bare-ground GeoTIFF; height = DSM - DTM (overrides lidar_source)
     "height_percentile": 92.0,     // building height = this percentile of the heights inside its footprint
     "lidar_inset_m": 1.0,          // [m] footprint shrunk by this before sampling (skips walls/eaves)
     "lidar_min_pixels": 10,        // fewer 1 m pixels inside a footprint -> OSM / default height instead
+    "lidar_spread_fallback_m": 3.0,  // point clouds (usgs3dep, tiles): a height read from the all-surface
+                                   //   nDSM (every footprint of a cloud without building returns, else those
+                                   //   without enough of them) is the median when percentile - median exceeds
+                                   //   this (a tree crown, not a roof; a median below min_height = no building:
+                                   //   OSM height or left out); null = never
+    "lidar_spread_everywhere": false,  // the same fallback for raster sources and dsm_file/dtm_file: off,
+                                   //   because a pitched roof has a large spread too
     "las_dir": null,               // LEGACY alternative to DSM/DTM: folder of classified .las/.laz point
                                    //   clouds. Not reprojected (must be in the site CRS) and used
                                    //   whenever set, even with height_source "osm". Untested on real data

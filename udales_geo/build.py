@@ -31,11 +31,20 @@ DEFAULTS = {
     "boundary_inset": 0.02,
     "partition_grid_m": 25.03,      # off-integer: immune to integer-aligned data
     "height_source": "auto",        # auto | lidar | osm (see surface.py / heights.py)
-    "lidar_source": "auto",         # auto | england | england_tiles | netherlands | flanders | france
+    "lidar_source": "auto",         # auto | england | england_tiles | netherlands | flanders | france |
+                                    # canada | switzerland | usgs3dep | tiles (your own LAZ tiles)
+    "tiles_dir": None,              # lidar_source tiles: folder of LAS/LAZ tiles (+ DEM GeoTIFFs)
+    "tiles_laz": None,              # glob patterns of the LAZ files (default *.laz, *.las)
+    "tiles_dem": None,              # glob patterns of DEM GeoTIFFs for the DTM (default: class-2 returns)
+    "tiles_crs": None,              # CRS of tiles whose LAS header has no readable one
     "dsm_file": None,
     "dtm_file": None,
     "lidar_inset_m": 1.0,
     "lidar_min_pixels": 10,
+    "lidar_spread_fallback_m": 3.0,  # point clouds: a height read from the all-surface nDSM (no building
+                                    # returns there, or no building class at all) is the median when
+                                    # percentile - median exceeds this (null: never; heights.py)
+    "lidar_spread_everywhere": False,  # ... also for raster sources and dsm_file/dtm_file (off: pitched roofs)
     "fill_gaps": True,              # fill gaps narrower than the grid (gaps.py)
     "gap_fill_width_dx": 1.0,       # ... narrower than this many dx
     "fill_courtyards": True,        # fill narrow enclosed courtyards (grid_fit.py)
@@ -265,16 +274,20 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         from .canopy import SiteRaster
         from .surface import get_ndsm
         site_r = SiteRaster(region.crs, *region.bbox, res=1.0)
-        ndsm, prov = get_ndsm(bcfg, site_r, out_dir, config_file.parent)
+        ndsm, prov, ndsm_b = get_ndsm(bcfg, site_r, out_dir, config_file.parent)
         failed = "; ".join(prov.get("lidar_failures", []))
         if ndsm is not None:
             bcfg["_ndsm"] = (ndsm, site_r.transform)
+            if ndsm_b is not None:
+                bcfg["_ndsm_building"] = (ndsm_b, site_r.transform)
+            bcfg["_ndsm_point_cloud"] = bool(prov.get("point_cloud"))   # the median fallback's default
             height_prov = prov
         elif hsrc == "lidar":
             raise ConfigError(
                 'height_source "lidar": no LiDAR for this site' + (f" ({failed})" if failed else
-                ". Automatic download covers England, Netherlands, Flanders/Brussels and "
-                'France; elsewhere set "dsm_file" + "dtm_file" (or "las_dir")') + ".")
+                ". Automatic download covers England, Netherlands, Flanders/Brussels, France, "
+                'Canada, Switzerland and the United States; elsewhere set "dsm_file" + '
+                '"dtm_file", or "lidar_source": "tiles" with your own LAZ tiles (or "las_dir")') + ".")
         else:
             # recorded, so a failed download is not mistaken for a deliberate OSM run
             height_prov = {"source": "osm", **prov}
@@ -342,7 +355,7 @@ def build_site(config_file: str | Path, force_fetch: bool = False,
         "tile": result["tile"],
         "building_heights": {**height_prov, **{k: result["heights"].get(k) for k in
                              ("from_lidar", "from_attribute", "from_default",
-                              "lidar_minus_osm_m")}},
+                              "lidar_minus_osm_m", "by_surface", "median_fallback")}},
         "fetch": {"file": str(gj_path), "n_buildings": n_fetched,
                   "n_with_height_tag": n_tagged,
                   "height_tag_coverage_pct": round(100.0 * n_tagged / n_fetched, 1)},

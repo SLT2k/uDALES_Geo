@@ -14,7 +14,9 @@ Where the project stands: [docs/PROGRESS.md](docs/PROGRESS.md).
 
 - **Buildings** from OpenStreetMap, with **heights from LiDAR** where it can be
   downloaded automatically (England, the Netherlands, Flanders + Brussels,
-  France) and from OSM tags elsewhere.
+  France, Switzerland, Canada, and the United States from 3DEP point clouds)
+  or read from your own LAZ tiles (`"lidar_source": "tiles"`), and from OSM
+  tags elsewhere.
 - **One connected building surface (STL)** — roofs, walls and the ground,
   open only along the domain edge — checked with uDALES' own `udgeom`, and made
   to suit the uDALES grid: gaps and courtyards too narrow for the grid are
@@ -167,7 +169,11 @@ flowchart TD
 
 - **Building heights** (`height_source`): `"auto"` (LiDAR where available),
   `"lidar"` (stop without LiDAR) or `"osm"`. Elsewhere you can give your own
-  `dsm_file` + `dtm_file`. A footprint LiDAR sees as flat keeps an OSM height
+  `dsm_file` + `dtm_file`, or LAZ tiles. From a point cloud a roof is read
+  from the building returns where the cloud has them; where it has none, a
+  footprint whose LiDAR heights are not one roof (a tree over it: the high
+  percentile more than `lidar_spread_fallback_m` [3 m] above the median)
+  takes the median. A footprint LiDAR sees as flat keeps an OSM height
   only; without one it is left out. In South Kensington, LiDAR is a median
   3.8 m taller than OSM where both exist.
 - **Periodic domains** (`"edge_buildings": "extend"`): an edge building is kept

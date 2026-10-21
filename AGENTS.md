@@ -63,9 +63,10 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `edges.py` | `edge_buildings: "extend"`: keep edge buildings whole and grow the domain |
 | `tile.py` | `tile: [nx, ny]`: copies of the periodic tile after the heights (stage 8b) |
 | `footprints.py` | load, clip, split and filter footprints (`load_footprints`); legacy CRS detection and non-GeoJSON readers |
-| `surface.py` | LiDAR nDSM for building heights: your DSM/DTM files or the shared downloader |
-| `rasters.py` | shared LiDAR downloader: `SOURCES` table (England, Netherlands, Flanders, France), tiling, caching, validation |
-| `heights.py` | one height per footprint (`assign_heights`): LiDAR percentile, OSM attribute, default; legacy LAS route |
+| `surface.py` | LiDAR nDSM for building heights: your DSM/DTM files, your point-cloud tiles, or the shared downloader |
+| `rasters.py` | shared LiDAR downloader: `SOURCES` table (England, Netherlands, Flanders, France, Canada, Switzerland, United States), tiling, caching, validation; STAC sources; `fetch_surfaces` |
+| `pointclouds.py` | point clouds to rasters on the site grid: USGS 3DEP (Entwine Point Tiles, The National Map tiles, z unit checked against the 3DEP DEM) and your own LAS/LAZ tiles; DSM, DTM and the building-class surface |
+| `heights.py` | one height per footprint (`assign_heights`): LiDAR percentile, OSM attribute, default; `assign_heights_two_surfaces`: building-class surface first, all-surface with a median fallback; legacy LAS route |
 | `buildings.py` | `build_buildings`: footprints → heights → clean-up → gap filling → grid fit → mesh → checks → `buildings.stl` and reports; legacy extrude route |
 | `gaps.py` | sub-grid gap filling (`fill_gaps`), `thread_through_fills`, `node_together` (both with `SNAP_TOL`), `remaining_narrow_area` |
 | `grid_fit.py` | uDALES issue #367 detection on the c-grid (`IBM_TOL` solid rule, labelling shared with `case_check`), courtyard filling, unseen buildings, centre plugs, census |
@@ -77,16 +78,18 @@ Run: `.venv\Scripts\python -m udales_geo configs\<file>.jsonc`
 | `case_check.py` | standalone, after udprep: #367 check on `solid_c.txt` (periodic per `BCxm`/`BCym`), unused facets, missing-flux lines from the case's logs; also holds `periodic_labels` and `level_components`, which `grid_fit.py` imports |
 | `facet_types.py` | standalone backend, not wired in: ground/roof/wall per STL triangle and the types file udprep reads |
 
-### Tests `tests/` (offline: no network, no uDALES clone; 169 cases)
+### Tests `tests/` (offline: no network, no uDALES clone; 204 cases)
 
 | file | covers |
 |---|---|
 | `test_edges.py` | extend policy (growth, clearance, min_inside, limits, bad mode); LiDAR roof percentile vs eaves |
 | `test_tile.py` | copies of the tile: translation, domain and grid growth, the `tile` key |
+| `test_pointclouds.py` | points to rasters (DSM highest return, DTM mean ground, building surface, noise left out), the EPT octree walk on a fake hierarchy, The National Map project ranking, the z-unit check, the local-tiles route end to end on a synthetic LAZ + DEM (building surface, tiles_crs, tiles that miss the site) |
+| `test_heights_two_surfaces.py` | the two-surface rule: building surface first, a shed under a tree takes the median, the median by default for a point cloud without building class (off with `lidar_spread_fallback_m` null), never for raster sources unless asked; an open lot under trees (median below `min_height`) takes its OSM height or is left out, not the crown; counters, LiDAR − OSM over both passes |
 | `test_osm_heights.py` | relation courtyards to the smallest containing outer (nested buildings); LiDAR-flat rule |
 | `test_osm.py` | height-tag parsing (finite, positive metres only), `building=no` left out, a courtyard ring that is a building kept, an incomplete Overpass answer refused |
 | `test_config.py` | null = default, `expnr` 0–999, error line numbers after block comments, corner order, antimeridian, the vegetation switch, grid spacing when xlen is not a multiple of dx |
-| `test_rasters.py` | DTM hole filling; request boxes on each source's pixel grid; request URLs per service kind |
+| `test_rasters.py` | DTM hole filling; request boxes on each source's pixel grid; request URLs per service kind; the new sources picked by location, STAC plans; a certificate failure not retried, a reset retried |
 | `test_gaps.py` | gap filling widths, heights, notches, domain edge, snap grid; mesher micro-face regression; per-piece opening; per-level sliver claim and noding that never swaps corners (both meshed and checked with `_hair_cracks`) |
 | `test_gaps_tips.py` | wedge tips (filled up to where a W-disc touches both walls; 60-90 deg corners not), tip height (lower of the two walls, not the lowest building nearby; a corner touch does not count; a short contact counts if it is a quarter of the outline; a sliver touching a building at one end takes no height from it; a part lined by a short building contact and a fill takes a fill height, by one short contact only the lowest neighbouring height; with the footprints' 1 cm precision model), pockets (between two tips, with the tip fills as walls; closed by a low kiosk; one that no level claims takes the lowest neighbouring height; a thin pocket part is not claimed where it hangs free), tips found in a later round (take the tip height; lined by a building and a lower fill, the fill's height; lined by two buildings, no height from fills; no heights from each other; a pocket fill less than half in one keeps its claim), slivers next to a taller tip (not raised to a speck, to a fill under 2 cm wide, on a touch at one end or on a touch under 5 snap steps), thin parts (with and without a grid point, a c point only, at an upper level, attached to claimed fills as a left-over or at its level, not counted as remaining), tip hull overreach (three random wedges, a rotated wedge, a pinch), a tip at the domain edge left open, overlapping mitre spikes and a near-degenerate opening that crashed the build |
 | `test_grid_fit.py` | courtyard detection and filling (outline and cell routes, heights, sheds, towers, roof-height solid rule, wide courtyard behind an unresolved slit), unseen buildings, plugs only where enclosed and without cracks, separate dy, `on_lattice` rounding like GEOS |
@@ -459,12 +462,24 @@ applies:
 | `netherlands` | Netherlands | AHN4 DSM − DTM (WCS 2.0.1); DTM holes under buildings filled | EPSG:28992, 0.5 m | 1500 m |
 | `flanders` | Flanders and Brussels | DHMV II DSM − DTM (WCS 1.0.0) | EPSG:31370, 1 m | 1500 m |
 | `france` | France, where delivered | IGN LiDAR HD MNH, already height above ground (WMS 1.3.0) | EPSG:2154, 0.5 m | 1000 m |
+| `canada` | Canada, where HRDEM exists | NRCan HRDEM: the newest LiDAR project with DSM and DTM, else the 1 m, else the 2 m mosaic (STAC + cloud-optimised GeoTIFF, the site window read over HTTP) | per project, 1–2 m | – |
+| `switzerland` | Switzerland | swissSURFACE3D raster DSM − swissALTI3D DTM (STAC + COG, 1 km tiles) | EPSG:2056, 0.5 m | – |
+| `usgs3dep` | United States | 3DEP point clouds (`pointclouds.py`): Entwine Point Tiles on AWS, else The National Map LAZ tiles; DSM = highest return, DTM = mean ground return, a building-class surface where class 6 exists; z unit (m or ft) checked against the 3DEP 1 m DEM | EPSG:3857 / project CRS | octree nodes / tiles |
+
+`"lidar_source": "tiles"` (not location-based) reads your own LAS/LAZ tiles
+(`tiles_dir`, `tiles_laz`, `tiles_dem` for DEM GeoTIFFs as the DTM, `tiles_crs`)
+the same way as 3DEP; only the tiles whose header extent touches the site are
+read. Point-cloud sources write `ndsm_building.tif` next to `ndsm.tif` when the
+cloud carries building returns (at least 1000 and 1 % of the surface returns).
+STAC sources cache the site-grid layers under `cache/lidar/<source>/`.
 
 Requests are made in the source's CRS on its pixel grid (padded by 2 pixels,
 snapped outward; an unsnapped box shifts the georeferencing on some
 services). A response must be a GeoTIFF of the requested size; error
-documents raise `SourceError` (not retried, nor are HTTP 4xx); other failures
-get 3 attempts in all, with pauses of 10, 20 and 30 s. A request wider than 256 pixels
+documents raise `SourceError` (not retried, nor are HTTP 4xx, nor a TLS
+certificate the local CA store cannot verify: its error names `SSL_CERT_FILE`
+and certifi); other failures get 3 attempts in all, with pauses of 10, 20
+and 30 s. A request wider than 256 pixels
 that times out or gets HTTP 502/503/504 is split in four (`TooSlow`, depth
 < 4). Values outside −500..9000 m become no-data. Valid tiles are cached in
 `cache/lidar/<source>/` and never downloaded again (not even with
@@ -504,6 +519,35 @@ go to `buildings.report.json` (`footprints`).
 ### Stage 8. One height per footprint
 
 `heights.py: assign_heights, _raster_heights, _attribute_height`
+
+Two surfaces (`assign_heights_two_surfaces`, called by `build_buildings`):
+with a building-class nDSM (point clouds with building returns) the percentile
+is read from it first, so a tree crown inside the footprint cannot reach it; a
+footprint with fewer than `lidar_min_pixels` building-return pixels (a shed
+under a tree) goes on to the all-surface nDSM. Median fallback
+(`lidar_spread_fallback_m` [3 m; null = never]): where the all-surface
+percentile exceeds the median by more than that, the pixels are not one roof
+and the median is the LiDAR value; a median below `min_height` is LiDAR seeing
+no building (an open lot under trees, a demolished house) and is treated like
+any LiDAR value below `min_height` (the table below: OSM height, else left
+out), not given the crown's height. It applies to point-cloud sources (`usgs3dep`,
+`tiles`; build.py sets `_ndsm_point_cloud` from `point_cloud` in their
+provenance): to the footprints left for the all-surface pass, which for a
+cloud without a building class (most 3DEP projects) is every footprint. On a
+Miami tile without the class, 218 buildings with measured OSM heights: the
+all-surface p95 is a median 3.10 m above OSM with 56 % more than 3 m off; with
+the fallback −0.28 m and 20 %. For raster sources and `dsm_file`/`dtm_file`
+it is off unless `lidar_spread_everywhere` is true (their sites keep their
+heights; a pitched roof has a large spread too: a Sydney suburb, 26 % of the
+houses, none of them trees). Without a building surface and without the
+fallback this is `assign_heights` itself. The per-footprint values are handed
+to `assign_heights` as `_lidar_values`, so `min_height`,
+`max_plausible_height` and the OSM height apply to them as to any LiDAR
+value. Report: `building_heights.by_surface` (counters per pass; the
+all-surface pass with `median_fallback` and `median_below_min_height`),
+`median_fallback` (medians used as heights), and `lidar_minus_osm_m` over the
+LiDAR heights of both passes (the building-class pass runs without the OSM
+attribute, so the wrapper counts its differences itself).
 
 LiDAR value: the `height_percentile` [92] percentile of the nDSM pixels inside
 the footprint shrunk by `lidar_inset_m` [1.0 m] (whole footprint if shrinking
@@ -1528,7 +1572,7 @@ inline where they are read, not in `DEFAULTS`: `snap_precision` 0.01,
 fallbacks in `buildings.py` and `heights.py` differ from `DEFAULTS`
 (`min_area` 0.0, `min_height` 0.0, `partition_grid_m` 25.0) but are never
 reached from `build_site`, because `DEFAULTS` is merged first. Private runtime values use a leading underscore
-(`_ndsm`, `_dz`).
+(`_ndsm`, `_ndsm_building`, `_ndsm_point_cloud`, `_lidar_values`, `_dz`).
 
 ### 4.9 Caches and their records
 
@@ -1778,7 +1822,10 @@ next to a plug; 0 narrow columns after filling in all. Unchanged by the
    within the service limit), `axes` (wcs2 subset axis names), optional
    `params`, `timeout`, `licence`, `note`. Table order is the `"auto"` order.
 2. A new service kind needs a branch in `rasters._url` (and possibly
-   `_fetch_tile`).
+   `_fetch_tile`). Kind `"stac"` entries give `api` and `plans` (collections and
+   asset keys, tried in order, `order: "newest"` to sort the items by date) and
+   are read with `_fetch_stac_layers`. A point-cloud source is kind
+   `"pointcloud"` and lives in `pointclouds.py` (`fetch_surfaces` calls it).
 3. Update the `lidar_source` comment in `example.jsonc`, the country list in
    the `height_source "lidar"` error in `build.py`, and the README list.
 4. `test_rasters.py` checks request boxes for every non-`ea_tiles` source

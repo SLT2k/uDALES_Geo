@@ -6,10 +6,15 @@ high percentile of the nDSM inside each (slightly shrunk) footprint.
 Sources, in order:
   1. your own "dsm_file" + "dtm_file" (GeoTIFFs, any CRS; DSM and DTM must use
      the same vertical datum) — any country
-  2. the shared downloader (rasters.py): England, Netherlands, Flanders +
-     Brussels, France — "lidar_source": "auto" picks the one covering the site
-Returns (None, info) when neither applies (the caller then keeps OSM heights
-and records info: the sources tried and their failures).
+  2. your own point-cloud tiles, "lidar_source": "tiles" with "tiles_dir"
+     (pointclouds.fetch_tiles): DSM, DTM and a building-class surface
+  3. the shared downloader (rasters.fetch_surfaces): England, Netherlands,
+     Flanders + Brussels, France, Canada, Switzerland, United States
+     (3DEP point clouds) — "lidar_source": "auto" picks the one covering the site
+Returns (None, info, None) when none applies (the caller then keeps OSM heights
+and records info: the sources tried and their failures). The third value is
+the building-class nDSM where the source is a point cloud with building
+returns (ndsm_building.tif), else None.
 """
 from __future__ import annotations
 
@@ -20,12 +25,12 @@ from pathlib import Path
 import numpy as np
 
 from .canopy import SiteRaster, _warp_into
-from .rasters import fetch_ndsm, fill_holes
+from .rasters import fetch_surfaces, fill_holes
 
 
 def get_ndsm(bcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path):
-    """Return (ndsm, provenance), or (None, info) (see rasters.fetch_ndsm).
-    Also writes ndsm.tif (for QGIS)."""
+    """Return (ndsm, provenance, ndsm_building), or (None, info, None) (see
+    rasters.fetch_surfaces). Also writes ndsm.tif (and ndsm_building.tif) for QGIS."""
     import rasterio
 
     from .common import ConfigError
@@ -34,6 +39,7 @@ def get_ndsm(bcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path):
         v = Path(v)
         return v if v.is_absolute() else (base_dir / v).resolve()
 
+    ndsm_b = None
     if bcfg.get("dsm_file") or bcfg.get("dtm_file"):
         if not (bcfg.get("dsm_file") and bcfg.get("dtm_file")):
             raise ConfigError('building heights need BOTH "dsm_file" and "dtm_file"')
@@ -47,11 +53,21 @@ def get_ndsm(bcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path):
         prov = {"source": "files", "dsm_file": str(p(bcfg["dsm_file"])),
                 "dtm_file": str(p(bcfg["dtm_file"])), "dtm_pixels_filled": n_filled,
                 "coverage_of_site": round(float(np.isfinite(ndsm).mean()), 4)}
+    elif bcfg.get("lidar_source") == "tiles":
+        from .pointclouds import fetch_tiles
+        if not bcfg.get("tiles_dir"):
+            raise ConfigError('"lidar_source": "tiles" needs "tiles_dir" (your LAS/LAZ tiles)')
+        cfg = dict(bcfg, tiles_dir=str(p(bcfg["tiles_dir"])))
+        layers, prov = fetch_tiles(site, site_dir / "cache" / "lidar", cfg)
+        if layers is None:
+            return None, prov, None
+        ndsm, ndsm_b = layers["ndsm"], layers["ndsm_building"]
     else:
-        ndsm, prov = fetch_ndsm(site, site_dir / "cache" / "lidar",
-                                bcfg.get("lidar_source", "auto"))
-        if ndsm is None:
-            return None, prov
+        layers, prov = fetch_surfaces(site, site_dir / "cache" / "lidar",
+                                      bcfg.get("lidar_source", "auto"))
+        if layers is None:
+            return None, prov, None
+        ndsm, ndsm_b = layers["ndsm"], layers["ndsm_building"]
 
     prov.update({"res_m": site.res, "crs": site.crs,
                  "made_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
@@ -59,8 +75,14 @@ def get_ndsm(bcfg: dict, site: SiteRaster, site_dir: Path, base_dir: Path):
                        height=site.height, count=1, dtype="float32", crs=site.crs,
                        transform=site.transform, nodata=np.nan, compress="deflate") as dst:
         dst.write(ndsm.astype(np.float32), 1)
+    if ndsm_b is not None:
+        with rasterio.open(site_dir / "ndsm_building.tif", "w", driver="GTiff", width=site.width,
+                           height=site.height, count=1, dtype="float32", crs=site.crs,
+                           transform=site.transform, nodata=np.nan, compress="deflate") as dst:
+            dst.write(ndsm_b.astype(np.float32), 1)
     (site_dir / "heights.provenance.json").write_text(json.dumps(prov, indent=2),
                                                       encoding="utf-8")
     print(f"[heights] LiDAR nDSM ({prov['source']}): {site.width}x{site.height} @ "
-          f"{site.res:g} m, covers {100 * prov['coverage_of_site']:.0f}% of the site")
-    return ndsm, prov
+          f"{site.res:g} m, covers {100 * prov['coverage_of_site']:.0f}% of the site"
+          + ("; building-class surface too" if ndsm_b is not None else ""))
+    return ndsm, prov, ndsm_b

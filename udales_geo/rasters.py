@@ -7,7 +7,10 @@ Each entry:
   lonlat   rough (lon0, lat0, lon1, lat1) box: which sources to TRY for a site
   kind     "wcs2" (OGC WCS 2.0.1, subset=axis(lo,hi)) | "wcs1" (WCS 1.0.0,
            bbox + width/height) | "wms" (WMS 1.3.0 GetMap, image/geotiff) |
-           "ea_tiles" (England 5 km zip tiles, the older route)
+           "ea_tiles" (England 5 km zip tiles, the older route) |
+           "stac" (a STAC API whose items are cloud-optimised GeoTIFFs, read
+           over HTTP for the site window only: "api", "plans") |
+           "pointcloud" (point clouds, pointclouds.py: USGS 3DEP)
   layers   {"dsm": (url, id), "dtm": (url, id)}  or  {"ndsm": (url, id)}
   crs      the service's native CRS (requests are made in it, and it is
            forced onto every file — some services label it unrecognisably)
@@ -22,7 +25,8 @@ Reliability, in order of importance:
   - every response is checked to be a real GeoTIFF of the requested size;
     an error document (XML/HTML) is reported with its text, not parsed as data
   - transient failures are retried (3 attempts, growing pauses); a request
-    the service rejects (4xx / ServiceException) is not retried
+    the service rejects (4xx / ServiceException) is not retried, nor one whose
+    TLS certificate the local CA store cannot verify (the error names the fix)
   - every tile is cached on disk once it is valid: an interrupted run
     resumes where it stopped and a rerun downloads nothing
   - values outside -500..9000 m are no-data, whatever the service calls
@@ -71,6 +75,26 @@ SOURCES = [
          crs="EPSG:31370", res=1.0, tile_m=1500.0, timeout=180,
          licence="Digitaal Vlaanderen, Modellicentie Gratis Hergebruik",
          note="DHMV II (2013-15), 1 m; Flanders and Brussels"),
+    # Added 2026-10-15, before "france" (its rough box covers Switzerland); used for 25 real-city
+    # tiles, probes in docs/building_height_sources.md
+    dict(name="canada", lonlat=(-141.0, 41.7, -52.6, 83.1), kind="stac",
+         api="https://datacube.services.geo.ca/api",
+         plans=[dict(layers={"dsm": ("hrdem-lidar", "dsm"), "dtm": ("hrdem-lidar", "dtm")}, order="newest"),
+                dict(layers={"dsm": ("hrdem-mosaic-1m", "dsm"), "dtm": ("hrdem-mosaic-1m", "dtm")}),
+                dict(layers={"dsm": ("hrdem-mosaic-2m", "dsm"), "dtm": ("hrdem-mosaic-2m", "dtm")})],
+         licence="Natural Resources Canada, Open Government Licence - Canada",
+         note="HRDEM (CanElevation series): the newest LiDAR project with DSM and DTM here, "
+              "else the 1 m mosaic, else the 2 m mosaic"),
+    dict(name="switzerland", lonlat=(5.9, 45.8, 10.5, 47.9), kind="stac",
+         api="https://data.geo.admin.ch/api/stac/v0.9",
+         plans=[dict(layers={"dsm": ("ch.swisstopo.swisssurface3d-raster", r"_0\.5_2056_\d+\.tif$"),
+                             "dtm": ("ch.swisstopo.swissalti3d", r"_0\.5_2056_\d+\.tif$")}, order="newest")],
+         licence="swisstopo, open government data (OGD), free use with source",
+         note="swissSURFACE3D Raster (DSM 0.5 m, 2018-) and swissALTI3D (DTM 0.5 m), 1 km tiles, LV95 / LN02"),
+    dict(name="usgs3dep", lonlat=(-180.0, 17.5, -64.0, 72.0), kind="pointcloud",
+         licence="USGS 3DEP, public domain (work of the U.S. Government)",
+         note="3DEP point clouds: Entwine Point Tiles on AWS (usgs-lidar-public), else the LAZ tiles "
+              "of The National Map; DSM, DTM and a building-class surface made here (pointclouds.py)"),
     dict(name="france", lonlat=(-5.3, 41.3, 9.7, 51.2), kind="wms",
          layers={"ndsm": ("https://data.geopf.fr/wms-r",
                           "IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93")},
@@ -132,9 +156,28 @@ def _is_timeout(e: Exception) -> bool:
     return isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError)
 
 
+def _is_cert_failure(e: Exception) -> bool:
+    """The server's TLS certificate could not be verified against the local CA
+    store (urllib wraps it in a URLError): the same on every attempt."""
+    import ssl
+    return (isinstance(e, ssl.SSLCertVerificationError)
+            or isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError)
+            or "CERTIFICATE_VERIFY_FAILED" in str(e))
+
+
+def _cert_error(url: str, e: Exception) -> SourceError:
+    from urllib.parse import urlparse
+    return SourceError(
+        f"{urlparse(url).netloc}: TLS certificate verification failed "
+        f"({getattr(e, 'reason', e)}), not retried. Python's CA store lacks this server's "
+        "certificate chain: pip install certifi, set the environment variable SSL_CERT_FILE "
+        "to the path that python -c \"import certifi; print(certifi.where())\" prints, and rerun")
+
+
 def _download(url: str, timeout: float, split_ok: bool) -> bytes:
     """GET with validation and retries. With split_ok, a gateway/read timeout
-    raises TooSlow at once (the tile gets split) instead of being retried."""
+    raises TooSlow at once (the tile gets split) instead of being retried. A
+    certificate that cannot be verified raises SourceError at once."""
     last = None
     for attempt in range(3):
         try:
@@ -149,6 +192,8 @@ def _download(url: str, timeout: float, split_ok: bool) -> bytes:
                 raise SourceError(f"HTTP {e.code}: {body}") from None
             last = f"HTTP {e.code}: {body[:200]}"
         except Exception as e:           # timeouts, resets, DNS: worth retrying
+            if _is_cert_failure(e):
+                raise _cert_error(url, e) from None
             if split_ok and _is_timeout(e):
                 raise TooSlow(f"{type(e).__name__}: {e}") from None
             last = f"{type(e).__name__}: {e}"
@@ -208,9 +253,12 @@ def _request_boxes(src: dict, site: SiteRaster) -> list:
             for j in range(len(ys) - 1) for i in range(len(xs) - 1)]
 
 
-def fetch_layers(src: dict, site: SiteRaster, cache_dir: Path) -> dict:
-    """{layer: array on the site grid} for every layer of the source."""
+def fetch_layers(src: dict, site: SiteRaster, cache_dir: Path, info: dict = None) -> dict:
+    """{layer: array on the site grid} for every layer of the source. info (a dict)
+    receives what a stac source used."""
     import rasterio
+    if src["kind"] == "stac":
+        return _fetch_stac_layers(src, site, cache_dir, info if info is not None else {})
     if src["kind"] == "ea_tiles":
         from .canopy import fetch_ea
         out = {}
@@ -267,51 +315,204 @@ def fill_holes(dtm: np.ndarray, max_px: int = 150) -> tuple:
 # --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
-def fetch_ndsm(site: SiteRaster, cache_dir: Path, choice: str = "auto"):
-    """nDSM (height above ground) on the site grid from the first source that
-    has data here. Returns (ndsm, provenance), or (None, info) when no source
-    delivered: info names the sources tried and why each failed (empty when
-    no source covers the site). A source named explicitly by `choice` must
-    work, or this raises."""
+def candidates(site: SiteRaster, choice: str = "auto") -> list:
+    """The sources to try: the one named, or every source whose rough box contains
+    the site centre, in table order."""
     from pyproj import Transformer
     if choice != "auto":
         if choice not in SOURCE_NAMES:
-            raise ValueError(f"lidar_source {choice!r} unknown; choose auto or one of "
+            raise ValueError(f"lidar_source {choice!r} unknown; choose auto, tiles or one of "
                              f"{', '.join(SOURCE_NAMES)}")
-        candidates = [s for s in SOURCES if s["name"] == choice]
-    else:
-        lon, lat = Transformer.from_crs(site.crs, "EPSG:4326", always_xy=True).transform(
-            (site.xmin + site.xmax) / 2, (site.ymin + site.ymax) / 2)
-        candidates = [s for s in SOURCES if s["lonlat"][0] <= lon <= s["lonlat"][2]
-                      and s["lonlat"][1] <= lat <= s["lonlat"][3]]
+        return [s for s in SOURCES if s["name"] == choice]
+    lon, lat = Transformer.from_crs(site.crs, "EPSG:4326", always_xy=True).transform(
+        (site.xmin + site.xmax) / 2, (site.ymin + site.ymax) / 2)
+    return [s for s in SOURCES if s["lonlat"][0] <= lon <= s["lonlat"][2]
+            and s["lonlat"][1] <= lat <= s["lonlat"][3]]
+
+
+def fetch_surfaces(site: SiteRaster, cache_dir: Path, choice: str = "auto"):
+    """({"ndsm": height above ground, "ndsm_building": the same from building
+    returns only, or None}, provenance) on the site grid from the first source that
+    has data here; (None, info) when no source delivered: info names the sources
+    tried and why each failed (empty when no source covers the site). A source
+    named explicitly by `choice` must work, or this raises. Only point-cloud
+    sources give a building surface (pointclouds.py)."""
     failures = []
-    for src in candidates:
-        try:
-            layers = fetch_layers(src, site, cache_dir)
-        except Exception as e:
-            failures.append(f"{src['name']}: {e}")
-            print(f"[lidar] {src['name']} failed: {e}")
-            if choice != "auto":
-                raise
-            continue
-        n_filled = 0
-        if "ndsm" in layers:
-            ndsm = layers["ndsm"]
-        else:
-            dtm, n_filled = fill_holes(layers["dtm"])
-            ndsm = layers["dsm"] - dtm
-        coverage = float(np.isfinite(ndsm).mean())
-        if coverage < MIN_COVERAGE:
-            msg = f"{src['name']}: data covers only {100 * coverage:.0f}% of the site"
-            print(f"[lidar] {msg} -> trying the next source")
-            failures.append(msg)
-            if choice != "auto":
-                raise SourceError(msg)
-            continue
-        prov = {"source": src["name"], "licence": src["licence"], "note": src["note"],
-                "service": src["kind"], "coverage_of_site": round(coverage, 4),
-                "dtm_pixels_filled": n_filled}
-        return ndsm, prov
+    for src in candidates(site, choice):
+        if src["kind"] == "pointcloud":
+            from .pointclouds import fetch_usgs3dep
+            layers, prov = fetch_usgs3dep(site, cache_dir)
+            if layers is None:
+                failures.extend(prov.get("lidar_failures", []))
+                if choice != "auto":
+                    raise SourceError("; ".join(prov.get("lidar_failures", [])) or f"{src['name']}: no data")
+                continue
+            return layers, prov
+        got = _fetch_raster_source(src, site, cache_dir, choice, failures)
+        if got is not None:
+            return got
     if failures:
         print("[lidar] WARNING: no LiDAR source delivered data here: " + "; ".join(failures))
-    return None, {"lidar_tried": [s["name"] for s in candidates], "lidar_failures": failures}
+    return None, {"lidar_tried": [s["name"] for s in candidates(site, choice)], "lidar_failures": failures}
+
+
+def fetch_ndsm(site: SiteRaster, cache_dir: Path, choice: str = "auto"):
+    """(ndsm, provenance) or (None, info): fetch_surfaces without the building surface."""
+    layers, prov = fetch_surfaces(site, cache_dir, choice)
+    return (layers["ndsm"] if layers is not None else None), prov
+
+
+def _fetch_raster_source(src: dict, site: SiteRaster, cache_dir: Path, choice: str, failures: list):
+    """One raster source tried: (layers, prov) or None (the failure appended)."""
+    info = {}
+    try:
+        layers = fetch_layers(src, site, cache_dir, info)
+    except Exception as e:
+        failures.append(f"{src['name']}: {e}")
+        print(f"[lidar] {src['name']} failed: {e}")
+        if choice != "auto":
+            raise
+        return None
+    n_filled = 0
+    if "ndsm" in layers:
+        ndsm = layers["ndsm"]
+    else:
+        dtm, n_filled = fill_holes(layers["dtm"])
+        ndsm = layers["dsm"] - dtm
+    coverage = float(np.isfinite(ndsm).mean())
+    if coverage < MIN_COVERAGE:
+        msg = f"{src['name']}: data covers only {100 * coverage:.0f}% of the site"
+        print(f"[lidar] {msg} -> trying the next source")
+        failures.append(msg)
+        if choice != "auto":
+            raise SourceError(msg)
+        return None
+    prov = {"source": src["name"], "licence": src["licence"], "note": src["note"],
+            "service": src["kind"], "coverage_of_site": round(coverage, 4),
+            "dtm_pixels_filled": n_filled, **info}
+    return {"ndsm": ndsm.astype(np.float32), "ndsm_building": None}, prov
+
+
+# --------------------------------------------------------------------------
+# STAC + cloud-optimised GeoTIFF sources (kind "stac")
+# --------------------------------------------------------------------------
+def _get_json(url: str, timeout: float = 90.0, attempts: int = 3) -> dict:
+    import json
+    last = None
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                                       "Accept": "application/geo+json, application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:                               # transient: retry with a pause
+            if _is_cert_failure(e):
+                raise _cert_error(url, e) from None
+            last = e
+            time.sleep(2.0 * (i + 1))
+    raise SourceError(f"{url}: {last}")
+
+
+def stac_items(api: str, collection: str, lonlat_bbox: tuple, limit: int = 100) -> list:
+    """Items of a STAC collection whose bbox touches lonlat_bbox (W, S, E, N)."""
+    from urllib.parse import urlencode
+    q = urlencode({"bbox": ",".join(f"{v:.6f}" for v in lonlat_bbox), "limit": limit})
+    return _get_json(f"{api}/collections/{collection}/items?{q}").get("features", [])
+
+
+def _asset_href(item: dict, key: str):
+    """The href of the asset named key, or whose name or href matches key as a regex."""
+    import re
+    assets = item.get("assets", {})
+    if key in assets:
+        return assets[key].get("href")
+    for name, a in assets.items():
+        if re.search(key, name) or re.search(key, a.get("href", "")):
+            return a.get("href")
+    return None
+
+
+def _pour_remote(dst: np.ndarray, site: SiteRaster, href: str) -> int:
+    """The site window of a remote GeoTIFF (GDAL /vsicurl, only the window is read)
+    reprojected onto the site grid into the still empty pixels of dst, so an earlier
+    (newer) item wins where items overlap. Returns the pixels filled."""
+    import rasterio
+    env = dict(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_MAX_RETRY="4", GDAL_HTTP_RETRY_DELAY="3",
+               GDAL_HTTP_TIMEOUT="120", VSI_CACHE="TRUE", VSI_CACHE_SIZE=str(64 << 20))
+    path = href if href.startswith("/vsi") or "://" not in href else "/vsicurl/" + href
+    tmp = site.empty()
+    with rasterio.Env(**env), rasterio.open(path) as src:
+        if not _warp_into(tmp, site, src):
+            return 0
+    m = np.isnan(dst) & np.isfinite(tmp)
+    dst[m] = tmp[m]
+    return int(m.sum())
+
+
+def _fetch_stac_layers(src: dict, site: SiteRaster, cache_dir: Path, info: dict) -> dict:
+    """{layer: array on the site grid} from the first plan of a stac source that has
+    both layers here. A plan: {"layers": {layer: (collection, asset key or regex)},
+    "order": "newest" to sort the items by datetime}. Layers are cached on the site
+    grid under cache_dir/<name>/, so a rerun reads nothing from the web."""
+    import json
+    import rasterio
+    ring = site.lonlat_polygon()["coordinates"][0]
+    lons, lats = [p[0] for p in ring], [p[1] for p in ring]
+    bbox = (min(lons), min(lats), max(lons), max(lats))
+    epsg = str(site.crs).split(":")[-1]
+    failures = []
+    for plan in src["plans"]:
+        layers, used = {}, {}
+        for layer, (collection, key) in plan["layers"].items():
+            cached = (cache_dir / src["name"] /
+                      f"{collection}_{layer}_{epsg}_{site.xmin:.0f}_{site.ymin:.0f}_{site.xmax:.0f}_{site.ymax:.0f}.tif")
+            if cached.is_file():
+                with rasterio.open(cached) as ds:
+                    layers[layer] = ds.read(1).astype(np.float32)
+                meta = cached.with_suffix(".json")
+                used[layer] = json.loads(meta.read_text(encoding="utf-8")) if meta.is_file() else {"collection": collection}
+                continue
+            try:
+                items = stac_items(src["api"], collection, bbox)
+            except SourceError as e:
+                failures.append(f"{collection}: {e}")
+                print(f"[lidar] {src['name']}: STAC search failed: {e}")
+                items = []
+            if plan.get("order") == "newest":
+                items.sort(key=lambda it: str(it.get("properties", {}).get("datetime", "")), reverse=True)
+            arr = site.empty()
+            poured = []
+            for it in items:
+                href = _asset_href(it, key)
+                if not href:
+                    continue
+                t0 = time.time()
+                try:
+                    n = _pour_remote(arr, site, href)
+                except Exception as e:
+                    failures.append(f"{it.get('id')}: {e}")
+                    print(f"[lidar] {src['name']}: {it.get('id')} failed: {e}")
+                    continue
+                if n:
+                    poured.append({"id": it.get("id"), "datetime": it.get("properties", {}).get("datetime"),
+                                   "pixels": n, "href": href})
+                    print(f"[lidar] {src['name']}: {layer} <- {it.get('id')} ({n:,} px, {time.time() - t0:.1f} s)")
+                if np.isfinite(arr).all():
+                    break
+            cov = float(np.isfinite(arr).mean())
+            if cov == 0.0:
+                print(f"[lidar] {src['name']}: no {layer} data in {collection} here")
+                layers = {}
+                break
+            layers[layer] = arr
+            used[layer] = {"collection": collection, "items": poured, "coverage": round(cov, 4)}
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(cached, "w", driver="GTiff", width=site.width, height=site.height, count=1,
+                               dtype="float32", crs=site.crs, transform=site.transform, nodata=np.nan,
+                               compress="deflate") as dst:
+                dst.write(arr, 1)
+            cached.with_suffix(".json").write_text(json.dumps(used[layer], indent=1), encoding="utf-8")
+        if len(layers) == len(plan["layers"]):
+            info["layers"] = used
+            return layers
+    raise SourceError("; ".join(failures) if failures else "no DSM/DTM data at this site")
